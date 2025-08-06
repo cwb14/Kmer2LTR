@@ -1,3 +1,5 @@
+Pipeline to estimate LTR-RT insertion time. (1) Use kmers to identify LTRs from a library of LTR-RTs. (2) Force global alignment of LTRs. (3) Date with p-dist, JC69, and K2P
+
 ```
 python Kmer2LTR/Kmer2LTR.py -h
 usage: Kmer2LTR.py [-h] [-k] [-v] [-d DIST] [-l KMIN] [-U KMAX] [-u MUTATION_RATE] [-f STD_FACTOR] [-e EXTENSION] [-t TEMP_DIR] [-o OUTFILE]
@@ -32,7 +34,7 @@ python Kmer2LTR/Kmer2LTR.py LTR-RT.fa
 Creates `LTRs.alns.results`.
 Output format:
 ```
-<LTR-RT>  <LTR_LEN>  <sunstitions> <transitions>  <transversions>  <p-dist> <p-time> <JC69-dist> <JC69-time> <K2P-dist>  <K2P-time>
+<LTR-RT>  <LTR_LEN>  <substitions> <transitions>  <transversions>  <p-dist> <p-time> <JC69-dist> <JC69-time> <K2P-dist>  <K2P-time>
 Gypsy1#LTR_Ty3	574	131	109	22	0.228223	3803717	0.272125	4535411	0.290682	4844705
 Gypsy2#LTR_Ty3	260	55	47	8	0.211538	3525641	0.248518	4141964	0.264922	4415361
 Gypsy3#LTR_Ty3	744	180	137	43	0.241935	4032258	0.292099	4868310	0.308338	5138959
