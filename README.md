@@ -1,3 +1,59 @@
+```
+python Kmer2LTR/Kmer2LTR.py -h
+usage: Kmer2LTR.py [-h] [-k] [-v] [-d DIST] [-l KMIN] [-U KMAX] [-u MUTATION_RATE] [-f STD_FACTOR] [-e EXTENSION] [-t TEMP_DIR] [-o OUTFILE]
+                   [-p THREADS]
+                   input_fasta
+
+Process multi-seq LTR-RT FASTA to extract and align LTRs.
+
+positional arguments:
+  input_fasta       Path to multi-sequence LTR-RT FASTA file.
+
+options:
+  -h, --help        show this help message and exit
+  -k                Keep temp directory after processing.
+  -v                Verbose mode; print each command before executing.
+  -d DIST           Minimum distance between kmer pairs (default: 80).
+  -l KMIN           Minimum kmer length (default: 8).
+  -U KMAX           Maximum kmer length (default: 12).
+  -u MUTATION_RATE  Mutation rate μ (default: 3e-8).
+  -f STD_FACTOR     Standard deviation factor for kmer filtering.
+  -e EXTENSION      Extension length for LTR extraction (default: 65).
+  -t TEMP_DIR       Temporary directory name (default: ./temp).
+  -o OUTFILE        Output filename (default: ./LTRs.alns.results).
+  -p THREADS        Number of parallel threads (default: 20).
+```
+
+
+```
+python Kmer2LTR/Kmer2LTR.py LTR-RT.fa
+```
+
+Creates `LTRs.alns.results`.
+Output format:
+```
+<LTR-RT>  <LTR_LEN>  <sunstitions> <transitions>  <transversions>  <p-dist> <p-time> <JC69-dist> <JC69-time> <K2P-dist>  <K2P-time>
+Gypsy1#LTR_Ty3	574	131	109	22	0.228223	3803717	0.272125	4535411	0.290682	4844705
+Gypsy2#LTR_Ty3	260	55	47	8	0.211538	3525641	0.248518	4141964	0.264922	4415361
+Gypsy3#LTR_Ty3	744	180	137	43	0.241935	4032258	0.292099	4868310	0.308338	5138959
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Developers note.
 TESS-PrinTE makes `lib_clean.fa` with LTR length in the header.   
 All LTRs are unmutated.   
 
