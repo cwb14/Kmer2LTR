@@ -19,7 +19,7 @@ cat lib_clean.15mp.titv2.fa | sed 's/\//_/g' | sed 's/LTRlen:/LTRlen/g' > lib_cl
 
 Run the pipeline.
 ```
-nohup /usr/bin/time -v python seq_divergence.py -p 100 lib_clean.15mp.titv2.clean.fa &
+nohup /usr/bin/time -v python Kmer2LTR.py -p 100 lib_clean.15mp.titv2.clean.fa &
 ```
 Default parameters seem fairly optimized. 
 
