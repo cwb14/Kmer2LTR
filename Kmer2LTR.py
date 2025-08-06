@@ -7,6 +7,8 @@ import subprocess
 from multiprocessing import Pool
 from pathlib import Path
 
+SCRIPT_DIR = Path(__file__).parent.resolve()
+
 # Global args placeholder\ARGS = None
 
 def run_cmd(cmd, verbose):
@@ -89,7 +91,7 @@ def process_dir(dir_path):
 
         mapped_file = dir_path / f"kmer_duet_k{k}.mapped"
         run_cmd_output([
-            "python", "map_kmers_to_fasta.py",
+            "python", str(SCRIPT_DIR / "map_kmers_to_fasta.py"),
             str(dir_path / "kmer_duet.txt"), str(seq_fa),
             "-d", str(dist)
         ], mapped_file, verbose=verbose)
@@ -105,7 +107,7 @@ def process_dir(dir_path):
     # Filter kmers
     filtered_file = dir_path / f"kmer_duet_k{kmin}_{kmax}.mapped.filtered"
     run_cmd([
-        "python", "filter_kmers.py", str(combined_file),
+        "python", str(SCRIPT_DIR / "filter_kmers.py"), str(combined_file),
         "--std-factor", str(std_factor),
         "-o", str(filtered_file)
     ], verbose)
@@ -113,7 +115,7 @@ def process_dir(dir_path):
     # Extract LTRs
     ltrs_fa = dir_path / "LTRs.fa"
     run_cmd([
-        "python", "extract_ltrs.py",
+        "python", str(SCRIPT_DIR / "extract_ltrs.py"),
         "-e", str(extension),
         str(filtered_file), str(seq_fa), str(ltrs_fa)
     ], verbose)
@@ -131,7 +133,7 @@ def process_dir(dir_path):
 
     # Final alignment and append results
     cmd_str = (
-        f"./wfa -E 10000 -e 10000 -o 10000 -O 10000 -u {args.mutation_rate} {dir_path / 'LTRs.aln.clean'}"
+        f"{SCRIPT_DIR / 'wfa'} -E 10000 -e 10000 -o 10000 -O 10000 -u {args.mutation_rate} {dir_path / 'LTRs.aln.clean'}"
         " | cut -f1,5-"
     )
 
