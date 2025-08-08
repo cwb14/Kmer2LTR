@@ -53,6 +53,8 @@ bool read_two_fasta(const string& path,
                 if (recs.size() >= 2) break;
             }
             header = line.substr(1);
+            size_t tpos = header.find('\t');
+            if (tpos != string::npos) header.erase(tpos);
         } else {
             seq += line;
         }

@@ -4,12 +4,32 @@ import argparse
 import os
 import shutil
 import subprocess
+import math
 from multiprocessing import Pool
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
 
-# Global args placeholder\ARGS = None
+# Global args placeholder
+ARGS = None
+
+
+def sanitize_name(name: str) -> str:
+    """
+    Make a filesystem-safe folder name from a FASTA header token.
+    Replaces path separators with a Unicode division slash '∕' (U+2215),
+    which looks like '/' but is not a path separator.
+    Also strips trailing dots/spaces which can be problematic on some FS.
+    """
+    # Replace forward/back slashes
+    safe = name.replace("/", "∕").replace("\\", "∕")
+    # Optionally, forbid leading/trailing whitespace
+    safe = safe.strip()
+    # Avoid names like '.' or '..'
+    if safe in {".", "..", ""}:
+        safe = f"header_{abs(hash(name))}"
+    return safe
+
 
 def run_cmd(cmd, verbose):
     """
@@ -17,7 +37,7 @@ def run_cmd(cmd, verbose):
     """
     if verbose:
         if isinstance(cmd, list):
-            print("Running:", " ".join(cmd))
+            print("Running:", " ".join(map(str, cmd)))
         else:
             print("Running:", cmd)
     subprocess.run(cmd, shell=not isinstance(cmd, list), check=True)
@@ -29,7 +49,7 @@ def run_cmd_output(cmd, output_path, stderr=None, verbose=False):
     """
     if verbose:
         if isinstance(cmd, list):
-            print("Running:", " ".join(cmd), ">", output_path)
+            print("Running:", " ".join(map(str, cmd)), ">", output_path)
         else:
             print("Running:", cmd)
     with open(output_path, "w") as out:
@@ -38,29 +58,41 @@ def run_cmd_output(cmd, output_path, stderr=None, verbose=False):
 
 def split_fasta(input_fasta, temp_dir):
     """
-    Split a multi-sequence FASTA into one seq.fa per sequence under temp_dir/<seq_id>/
+    Split a multi-sequence FASTA into one seq.fa per sequence under
+    temp_dir/<sanitized_seq_id>/, preserving the original header in seq.fa.
+
+    Writes a header_map.tsv mapping:  sanitized_name <TAB> original_header
     """
-    current_out = None
-    with open(input_fasta) as infile:
+    temp_dir = Path(temp_dir)
+    map_path = temp_dir / "header_map.tsv"
+    with open(input_fasta) as infile, open(map_path, "w") as map_out:
+        current_out = None
+        current_dir = None
         for line in infile:
             if line.startswith(">"):
-                header = line[1:].strip().split()[0]
-                dir_path = Path(temp_dir) / header
+                header = line[1:].strip().split()[0]  # token before first whitespace
+                safe = sanitize_name(header)
+                dir_path = temp_dir / safe
                 dir_path.mkdir(parents=True, exist_ok=True)
+                # write mapping once per header encountered
+                map_out.write(f"{safe}\t{header}\n")
                 if current_out:
                     current_out.close()
+                current_dir = dir_path
                 current_out = open(dir_path / "seq.fa", "w")
+                # Write original header as-is (so no loss of info for downstream)
                 current_out.write(line)
             else:
                 if current_out:
                     current_out.write(line)
-    if current_out:
-        current_out.close()
+        if current_out:
+            current_out.close()
 
 
 def process_dir(dir_path):
     """
-    Process one sequence directory: k-mer counting, filtering, LTR extraction, alignment, trimming, and final wfa.
+    Process one sequence directory: k-mer counting, filtering, LTR extraction,
+    alignment, trimming, and final wfa.
     """
     args = ARGS
     verbose = args.verbose
@@ -134,13 +166,80 @@ def process_dir(dir_path):
     # Final alignment and append results
     cmd_str = (
         f"{SCRIPT_DIR / 'wfa'} -E 10000 -e 10000 -o 10000 -O 10000 -u {args.mutation_rate} {dir_path / 'LTRs.aln.clean'}"
-        " | cut -f1,5-"
+        "| cut -f1,5- | sed -e 's/-0\\.000000/0.000000/g'"
     )
 
     if verbose:
         print("Running:", cmd_str)
     with open(out_file, "a") as ofile:
         subprocess.run(cmd_str, shell=True, check=True, stdout=ofile)
+
+def write_summary(main_out_path: str):
+    """
+    Read the main outfile (one row per element), sum length/transition/transversion,
+    and write pooled distances to '<outfile>.summary'.
+
+    Columns (no header):
+    1 LTR-RT  2 LTR_LEN  3 substitutions  4 transitions  5 transversions
+    6 p-dist  7 p-time   8 JC69-dist      9 JC69-time     10 K2P-dist   11 K2P-time
+    """
+    total_len = 0
+    total_ts = 0.0
+    total_tv = 0.0
+
+    with open(main_out_path) as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split()
+            if len(parts) < 11:
+                # Skip malformed lines
+                continue
+            # Parse needed fields
+            try:
+                L = int(parts[1])
+                ts = float(parts[3])
+                tv = float(parts[4])
+            except ValueError:
+                continue
+            total_len += L
+            total_ts += ts
+            total_tv += tv
+
+    # Guard against empty/zero totals
+    if total_len == 0:
+        summary_path = main_out_path + ".summary"
+        with open(summary_path, "w") as out:
+            out.write("total_length\t0\n")
+            out.write("total_transitions\t0\n")
+            out.write("total_transversions\t0\n")
+            out.write("raw_d\tNA\nJC69_d\tNA\nK2P_d\tNA\n")
+        return
+
+    # Pooled proportions
+    P = total_ts / total_len  # transitions / site
+    Q = total_tv / total_len  # transversions / site
+    raw_d = P + Q
+
+    # JC69: d = -3/4 * ln(1 - 4/3 * p)
+    jc_term = 1.0 - (4.0/3.0) * raw_d
+    JC69_d = None if jc_term <= 0 else -0.75 * math.log(jc_term)
+
+    # K2P: d = -1/2 ln(1 - 2P - Q) - 1/4 ln(1 - 2Q)
+    k2p_t1 = 1.0 - 2.0 * P - Q
+    k2p_t2 = 1.0 - 2.0 * Q
+    K2P_d = None if (k2p_t1 <= 0 or k2p_t2 <= 0) else (-0.5 * math.log(k2p_t1) - 0.25 * math.log(k2p_t2))
+
+    # Write summary
+    summary_path = main_out_path + ".summary"
+    with open(summary_path, "w") as out:
+        out.write(f"total_length\t{total_len}\n")
+        out.write(f"total_transitions\t{total_ts:.0f}\n")
+        out.write(f"total_transversions\t{total_tv:.0f}\n")
+        out.write(f"raw_d\t{raw_d:.6f}\n")
+        out.write(f"JC69_d\t{('NA' if JC69_d is None else f'{JC69_d:.6f}')}\n")
+        out.write(f"K2P_d\t{('NA' if K2P_d is None else f'{K2P_d:.6f}')}\n")
 
 
 if __name__ == "__main__":
@@ -204,11 +303,10 @@ if __name__ == "__main__":
     os.makedirs(args.temp_dir, exist_ok=True)
     open(args.outfile, "w").close()
 
-    # Split FASTA into separate seq.fa files
+    # Split FASTA into separate seq.fa files (safe dir names; original headers preserved)
     split_fasta(args.input_fasta, args.temp_dir)
 
     # Set global arguments for process_dir
-    global ARGS
     ARGS = args
 
     # Discover sequence directories
@@ -217,6 +315,8 @@ if __name__ == "__main__":
     # Process in parallel
     with Pool(processes=args.threads) as pool:
         pool.map(process_dir, dirs)
+
+    write_summary(args.outfile)
 
     # Cleanup
     if args.keep_temp:
