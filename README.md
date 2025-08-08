@@ -68,7 +68,7 @@ python lib_mutator.py -i lib_clean.fa -o lib_clean.15mp.titv2.fa -mp 15 -TiTv 2 
 LTRs are 15% mutated. TiTv ratio = 2. 
 Internal sequence is not mutated. 
 
-This new seq_divergence pipeline has issues with ':' and '/' in header. 
+This new kmer2ltr pipeline has issues with ':' and '/' in header. 
 I will fix if the pipeline is adopted. 
 But for now...
 ```
@@ -118,3 +118,5 @@ Mean: 0.295765 Median: 0.297855
 
 Runtime.
 With 100 threads, it processes 20,571 LTR-RTs in 27m:7s.
+
+Idea: Calculate and report p-dist, JC69-dist, and K2P-dist for all LTR-RTs as a single composite measurment using the sum of all lengths, sum of all transversions, etc. this might be better than taking the mean of all LTR-RT divergencews. 
