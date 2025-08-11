@@ -30,6 +30,26 @@ def sanitize_name(name: str) -> str:
         safe = f"header_{abs(hash(name))}"
     return safe
 
+# Skip processing those LTR-RTs where LTR boundrys cannot be determined.
+# Happens if lots of mutation and the LTR region is tiny.
+def has_data_rows(path: Path) -> bool:
+    """
+    True if file exists and contains at least one non-empty, non-header line.
+    Treats a header-only file as empty.
+    """
+    try:
+        with open(path) as fh:
+            for line in fh:
+                s = line.strip()
+                if not s:
+                    continue
+                # common header starts with 'kmer' in your pipeline
+                if s.lower().startswith("kmer"):
+                    continue
+                return True
+    except FileNotFoundError:
+        return False
+    return False
 
 def run_cmd(cmd, verbose):
     """
@@ -136,13 +156,23 @@ def process_dir(dir_path):
             with open(part) as infile:
                 outfile.write(infile.read())
 
-    # Filter kmers
     filtered_file = dir_path / f"kmer_duet_k{kmin}_{kmax}.mapped.filtered"
     run_cmd([
         "python", str(SCRIPT_DIR / "filter_kmers.py"), str(combined_file),
         "--std-factor", str(std_factor),
         "-o", str(filtered_file)
     ], verbose)
+
+    # NEW: short-circuit if empty or header-only
+    if not has_data_rows(filtered_file):
+        print(f"[SKIP] No k-mer pairs after filtering for {dir_path.name} "
+              f"({filtered_file} is empty/header-only).")
+        # Optional: leave a marker in the subdir for bookkeeping
+        try:
+            (dir_path / "SKIPPED.no_filtered_pairs").write_text("")
+        except Exception:
+            pass
+        return
 
     # Extract LTRs
     ltrs_fa = dir_path / "LTRs.fa"
@@ -329,3 +359,5 @@ if __name__ == "__main__":
         shutil.rmtree(args.temp_dir)
 
     print(f"All sequences processed. Output in {args.outfile}")
+    
+  
