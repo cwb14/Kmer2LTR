@@ -159,8 +159,11 @@ def process_dir(dir_path):
     ], aln_fa, stderr=subprocess.DEVNULL, verbose=verbose)
 
     run_cmd([
-        "trimal", "-automated1", "-in", str(aln_fa), "-out",
-        str(dir_path / "LTRs.aln.clean")
+        "trimal",
+        "-automated1",
+        "-keepheader", # For benchmarking LTR boundry classification, its helpful to have the LTR length in the header. Without "-keepheader", trimal modifies 'Gypsy-1_CiLe_Cimex#LTR/Ty3~LTRlen:490' to 'Gypsy-1_CiLe_Cimex#LTR/Ty3~LTRlen'.
+        "-in", str(aln_fa),
+        "-out", str(dir_path / "LTRs.aln.clean")
     ], verbose)
 
     # Final alignment and append results
