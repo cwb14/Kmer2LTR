@@ -7,31 +7,28 @@ import subprocess
 import math
 from multiprocessing import Pool
 from pathlib import Path
+import re
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
 
-# Global args placeholder
+# Global args/domains placeholders
 ARGS = None
+DOMAINS = None  # dict[str,int] or None
 
 
 def sanitize_name(name: str) -> str:
     """
     Make a filesystem-safe folder name from a FASTA header token.
-    Replaces path separators with a Unicode division slash '∕' (U+2215),
-    which looks like '/' but is not a path separator.
+    Replaces path separators with a Unicode division slash '∕' (U+2215).
     Also strips trailing dots/spaces which can be problematic on some FS.
     """
-    # Replace forward/back slashes
     safe = name.replace("/", "∕").replace("\\", "∕")
-    # Optionally, forbid leading/trailing whitespace
     safe = safe.strip()
-    # Avoid names like '.' or '..'
     if safe in {".", "..", ""}:
         safe = f"header_{abs(hash(name))}"
     return safe
 
-# Skip processing those LTR-RTs where LTR boundrys cannot be determined.
-# Happens if lots of mutation and the LTR region is tiny.
+
 def has_data_rows(path: Path) -> bool:
     """
     True if file exists and contains at least one non-empty, non-header line.
@@ -43,13 +40,13 @@ def has_data_rows(path: Path) -> bool:
                 s = line.strip()
                 if not s:
                     continue
-                # common header starts with 'kmer' in your pipeline
                 if s.lower().startswith("kmer"):
                     continue
                 return True
     except FileNotFoundError:
         return False
     return False
+
 
 def run_cmd(cmd, verbose):
     """
@@ -71,37 +68,135 @@ def run_cmd_output(cmd, output_path, stderr=None, verbose=False):
         if isinstance(cmd, list):
             print("Running:", " ".join(map(str, cmd)), ">", output_path)
         else:
-            print("Running:", cmd)
+            print("Running:", cmd, ">", output_path)
     with open(output_path, "w") as out:
         subprocess.run(cmd, shell=not isinstance(cmd, list), stdout=out, stderr=stderr, check=True)
+
+
+def contains_internal_gaps(fasta_path: Path) -> bool:
+    """
+    Return True if any sequence in the FASTA has an internal gap ('-'
+    after trimming leading/trailing gaps). Whitespace is ignored.
+
+    MAFFT and trimal might try to build an alignment where it doesnt exist.
+    A true LTR alignment ought not have internal gaps, but I may to lossen it for highly diveregend sequences.
+    This step aims to filter out bogus results.
+
+    This seems most helpful if an input seq is not actually an LTR-RT, but happens to have some shared kmers.
+    """
+    c = 0
+    header = None
+    seq_chunks = []
+    with open(fasta_path) as it:
+        for l in it:
+            if l.startswith('>'):
+                if header is not None:
+                    t = re.sub(r'\s+', '', ''.join(seq_chunks))
+                    if '-' in t.strip('-'):
+                        c += 1
+                header = l
+                seq_chunks = []
+            else:
+                seq_chunks.append(l.strip())
+        # flush last
+        if header is not None:
+            t = re.sub(r'\s+', '', ''.join(seq_chunks))
+            if '-' in t.strip('-'):
+                c += 1
+    return c > 0
+
+
+def read_domains(domains_tsv: str):
+    """
+    Read domains TSV: <name> <TAB> <ltr_len>. Ignores blank/comment lines.
+    Returns dict[name] = int(ltr_len)
+    """
+    if not domains_tsv:
+        return None
+    mapping = {}
+    with open(domains_tsv) as fh:
+        for ln, line in enumerate(fh, 1):
+            s = line.strip()
+            if not s or s.startswith("#"):
+                continue
+            parts = s.split("\t")
+            if len(parts) < 2:
+                print(f"[DOMAINS] Skipping malformed line {ln}: {s}")
+                continue
+            name, ltr = parts[0], parts[1]
+            try:
+                ltr_len = int(ltr)
+            except ValueError:
+                print(f"[DOMAINS] Skipping non-integer LTR length at line {ln}: {s}")
+                continue
+            if ltr_len <= 0:
+                print(f"[DOMAINS] Skipping non-positive LTR length at line {ln}: {s}")
+                continue
+            mapping[name] = ltr_len
+    if not mapping:
+        print("[DOMAINS] No valid entries parsed; ignoring domains file.")
+        return None
+    print(f"[DOMAINS] Loaded {len(mapping)} entries from {domains_tsv}")
+    return mapping
 
 
 def split_fasta(input_fasta, temp_dir):
     """
     Split a multi-sequence FASTA into one seq.fa per sequence under
-    temp_dir/<sanitized_seq_id>/, preserving the original header in seq.fa.
+    temp_dir/<sanitized_seq_id>[/__dupN]/, preserving the original header in seq.fa.
 
-    Writes a header_map.tsv mapping:  sanitized_name <TAB> original_header
+    Writes a header_map.tsv mapping: sanitized_name <TAB> original_header_token
+
+    If duplicate header tokens occur, create unique dirs with a __dupN suffix and
+    write a DUPLICATE_NAME marker file in *all* such directories so we can safely
+    fall back to the full pipeline for those.
     """
     temp_dir = Path(temp_dir)
     map_path = temp_dir / "header_map.tsv"
+    counts = {}
     with open(input_fasta) as infile, open(map_path, "w") as map_out:
         current_out = None
         current_dir = None
         for line in infile:
             if line.startswith(">"):
-                header = line[1:].strip().split()[0]  # token before first whitespace
-                safe = sanitize_name(header)
+                header_line = line[1:].strip()
+                header_token = header_line.split()[0]  # token before first whitespace
+                counts[header_token] = counts.get(header_token, 0) + 1
+
+                base_safe = sanitize_name(header_token)
+                # First occurrence: base name; duplicates get a suffix
+                if counts[header_token] == 1:
+                    safe = base_safe
+                else:
+                    safe = f"{base_safe}__dup{counts[header_token]}"
+
                 dir_path = temp_dir / safe
                 dir_path.mkdir(parents=True, exist_ok=True)
-                # write mapping once per header encountered
-                map_out.write(f"{safe}\t{header}\n")
+
+                # If we just learned this token is a duplicate (count==2),
+                # go back and mark the first directory as duplicate as well.
+                if counts[header_token] == 2:
+                    first_dir = temp_dir / base_safe
+                    try:
+                        (first_dir / "DUPLICATE_NAME").write_text("")
+                    except Exception:
+                        pass
+
+                # Always mark duplicates (count>1)
+                if counts[header_token] > 1:
+                    try:
+                        (dir_path / "DUPLICATE_NAME").write_text("")
+                    except Exception:
+                        pass
+
+                # mapping: sanitized dir -> original header token
+                map_out.write(f"{safe}\t{header_token}\n")
+
                 if current_out:
                     current_out.close()
                 current_dir = dir_path
                 current_out = open(dir_path / "seq.fa", "w")
-                # Write original header as-is (so no loss of info for downstream)
-                current_out.write(line)
+                current_out.write(">" + header_line + "\n")
             else:
                 if current_out:
                     current_out.write(line)
@@ -109,10 +204,82 @@ def split_fasta(input_fasta, temp_dir):
             current_out.close()
 
 
+def read_seq_string(seq_fa: Path) -> str:
+    """Read a single FASTA sequence (concatenate all non-header lines)."""
+    seq_chunks = []
+    with open(seq_fa) as fh:
+        for line in fh:
+            if line.startswith(">"):
+                continue
+            seq_chunks.append(line.strip())
+    return "".join(seq_chunks)
+
+
+def try_fast_path(dir_path: Path, header_token: str, seq_len: int) -> bool:
+    """
+    Try fast-path extraction + WFA if domains info is available and safety checks pass.
+    Returns True if fast-path executed (regardless of WFA success/exception),
+    False if we should run the full pipeline.
+    """
+    global ARGS, DOMAINS
+    if not DOMAINS:
+        return False
+
+    # Duplicate name? -> uncertain mapping -> full pipeline
+    if (dir_path / "DUPLICATE_NAME").exists():
+        if ARGS.verbose:
+            print(f"[FAST-PATH SKIP] Duplicate header name detected for '{header_token}'.")
+        return False
+
+    if header_token not in DOMAINS:
+        return False
+
+    ltr_len = DOMAINS[header_token]
+
+    # Safety check: length_of_element > 2*ltr_len + 50
+    if not (seq_len > (2 * ltr_len + 50)):
+        if ARGS.verbose:
+            print(f"[FAST-PATH SKIP] Safety check failed for '{header_token}': "
+                  f"seq_len={seq_len} <= 2*{ltr_len}+50")
+        return False
+
+    # Perform direct extraction
+    seq = read_seq_string(dir_path / "seq.fa")
+    five_p = seq[:ltr_len]
+    three_p = seq[-ltr_len:]
+
+    # Create the file that the WFA step expects
+    aln_clean = dir_path / "LTRs.aln.clean"
+    with open(aln_clean, "w") as out:
+        out.write(f">{header_token}_5prime_LTR_len{ltr_len}\n")
+        out.write(five_p + "\n")
+        out.write(f">{header_token}_3prime_LTR_len{ltr_len}\n")
+        out.write(three_p + "\n")
+
+    if ARGS.verbose:
+        print(f"[FAST-PATH] {dir_path.name}: extracted 5′/3′ LTRs (len={ltr_len}) directly from domains TSV.")
+
+    # Run WFA on the two LTRs and append to main outfile
+    cmd_str = (
+        f"{SCRIPT_DIR / 'wfa'} -E 10000 -e 10000 -o 10000 -O 10000 -u {ARGS.mutation_rate} {aln_clean}"
+        " | cut -f1,5- | sed -e 's/-0\\.000000/0.000000/g' | "
+        "awk -F'\t' '{if($1~/_(5prime|3prime)/) sub(/_(5prime|3prime).*$/, \"\", $1); print}' OFS='\t' | " # trim off temp suffix.
+        "awk '$6 <= 0.35' " # p-dist > 0.35 is likely a false positive.
+    )
+    
+    if ARGS.verbose:
+        print("Running:", cmd_str)
+    with open(ARGS.outfile, "a") as ofile:
+        subprocess.run(cmd_str, shell=True, check=True, stdout=ofile)
+
+    return True
+
+
 def process_dir(dir_path):
     """
-    Process one sequence directory: k-mer counting, filtering, LTR extraction,
-    alignment, trimming, and final wfa.
+    Process one sequence directory:
+      - If domains TSV provides a safe fast-path, extract LTRs directly and run WFA.
+      - Otherwise run the original heavy pipeline (k-mers -> map -> filter -> extract LTRs -> MAFFT -> trimal -> WFA).
     """
     args = ARGS
     verbose = args.verbose
@@ -126,7 +293,21 @@ def process_dir(dir_path):
     dir_path = Path(dir_path)
     print(f"Processing {dir_path}")
     seq_fa = dir_path / "seq.fa"
+    # Header token (the same notion used for domains lookup)
+    with open(seq_fa) as fh:
+        first = next((ln for ln in fh if ln.startswith(">")), None)
+    header_token = first[1:].strip().split()[0] if first else dir_path.name
+
     seq_len = sum(len(line.strip()) for line in seq_fa.open() if not line.startswith(">"))
+
+    # ===== FAST-PATH TRY =====
+    try:
+        if try_fast_path(dir_path, header_token, seq_len):
+            return
+    except Exception as e:
+        print(f"[FAST-PATH ERROR] {header_token}: {e}. Falling back to full pipeline.")
+
+    # ===== ORIGINAL HEAVY PIPELINE =====
 
     # K-mer counting and mapping
     for k in range(kmin, kmax + 1):
@@ -163,11 +344,10 @@ def process_dir(dir_path):
         "-o", str(filtered_file)
     ], verbose)
 
-    # NEW: short-circuit if empty or header-only
+    # Short-circuit if empty or header-only
     if not has_data_rows(filtered_file):
         print(f"[SKIP] No k-mer pairs after filtering for {dir_path.name} "
               f"({filtered_file} is empty/header-only).")
-        # Optional: leave a marker in the subdir for bookkeeping
         try:
             (dir_path / "SKIPPED.no_filtered_pairs").write_text("")
         except Exception:
@@ -187,25 +367,36 @@ def process_dir(dir_path):
     run_cmd_output([
         "mafft", "--auto", "--thread", "1", str(ltrs_fa)
     ], aln_fa, stderr=subprocess.DEVNULL, verbose=verbose)
+    
+    # Short-circuit if MAFFT introduces internal gaps (likely bogus alignment)
+    if contains_internal_gaps(aln_fa):
+        print(f"[SKIP] Internal gaps detected after MAFFT for {dir_path.name} ({aln_fa}).")
+        try:
+            (dir_path / "SKIPPED.internal_gaps").write_text("")
+        except Exception:
+            pass
+        return
 
     run_cmd([
         "trimal",
         "-automated1",
-        "-keepheader", # For benchmarking LTR boundry classification, its helpful to have the LTR length in the header. Without "-keepheader", trimal modifies 'Gypsy-1_CiLe_Cimex#LTR/Ty3~LTRlen:490' to 'Gypsy-1_CiLe_Cimex#LTR/Ty3~LTRlen'.
+        "-keepheader",  # For benchmarking LTR boundry classification, its helpful to have the LTR length in the header. Without "-keepheader", trimal modifies 'Gypsy-1_CiLe_Cimex#LTR/Ty3~LTRlen:490' to 'Gypsy-1_CiLe_Cimex#LTR/Ty3~LTRlen'.
         "-in", str(aln_fa),
         "-out", str(dir_path / "LTRs.aln.clean")
     ], verbose)
 
-    # Final alignment and append results
+    # Final WFA and append results
     cmd_str = (
         f"{SCRIPT_DIR / 'wfa'} -E 10000 -e 10000 -o 10000 -O 10000 -u {args.mutation_rate} {dir_path / 'LTRs.aln.clean'}"
-        "| cut -f1,5- | sed -e 's/-0\\.000000/0.000000/g'"
+        " | cut -f1,5- | sed -e 's/-0\\.000000/0.000000/g' | "
+        "awk '$6 <= 0.35' " # Filter out likely false positives.
     )
 
     if verbose:
         print("Running:", cmd_str)
     with open(out_file, "a") as ofile:
         subprocess.run(cmd_str, shell=True, check=True, stdout=ofile)
+
 
 def write_summary(main_out_path: str):
     """
@@ -227,9 +418,7 @@ def write_summary(main_out_path: str):
                 continue
             parts = line.split()
             if len(parts) < 11:
-                # Skip malformed lines
                 continue
-            # Parse needed fields
             try:
                 L = int(parts[1])
                 ts = float(parts[3])
@@ -240,9 +429,8 @@ def write_summary(main_out_path: str):
             total_ts += ts
             total_tv += tv
 
-    # Guard against empty/zero totals
+    summary_path = main_out_path + ".summary"
     if total_len == 0:
-        summary_path = main_out_path + ".summary"
         with open(summary_path, "w") as out:
             out.write("total_length\t0\n")
             out.write("total_transitions\t0\n")
@@ -250,22 +438,17 @@ def write_summary(main_out_path: str):
             out.write("raw_d\tNA\nJC69_d\tNA\nK2P_d\tNA\n")
         return
 
-    # Pooled proportions
-    P = total_ts / total_len  # transitions / site
-    Q = total_tv / total_len  # transversions / site
+    P = total_ts / total_len
+    Q = total_tv / total_len
     raw_d = P + Q
 
-    # JC69: d = -3/4 * ln(1 - 4/3 * p)
     jc_term = 1.0 - (4.0/3.0) * raw_d
     JC69_d = None if jc_term <= 0 else -0.75 * math.log(jc_term)
 
-    # K2P: d = -1/2 ln(1 - 2P - Q) - 1/4 ln(1 - 2Q)
     k2p_t1 = 1.0 - 2.0 * P - Q
     k2p_t2 = 1.0 - 2.0 * Q
     K2P_d = None if (k2p_t1 <= 0 or k2p_t2 <= 0) else (-0.5 * math.log(k2p_t1) - 0.25 * math.log(k2p_t2))
 
-    # Write summary
-    summary_path = main_out_path + ".summary"
     with open(summary_path, "w") as out:
         out.write(f"total_length\t{total_len}\n")
         out.write(f"total_transitions\t{total_ts:.0f}\n")
@@ -277,7 +460,8 @@ def write_summary(main_out_path: str):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Process multi-seq LTR-RT FASTA to extract and align LTRs."
+        description="Process multi-seq LTR-RT FASTA to extract and align LTRs. "
+                    "Optionally fast-path known LTR lengths via a domains TSV."
     )
     parser.add_argument(
         "-k", action="store_true", dest="keep_temp",
@@ -324,6 +508,12 @@ if __name__ == "__main__":
         help="Number of parallel threads (default: 20)."
     )
     parser.add_argument(
+        "-D", "--domains", dest="domains_tsv", default=None,
+        help="Optional TSV (name\\tLTR_len). If provided, sequences whose names "
+             "appear here and pass safety checks will skip k-mer/MAFFT/trimal and "
+             "go straight to WFA using the first/last LTR_len bp."
+    )
+    parser.add_argument(
         "input_fasta",
         help="Path to multi-sequence LTR-RT FASTA file."
     )
@@ -336,7 +526,10 @@ if __name__ == "__main__":
     os.makedirs(args.temp_dir, exist_ok=True)
     open(args.outfile, "w").close()
 
-    # Split FASTA into separate seq.fa files (safe dir names; original headers preserved)
+    # Load domains mapping (if provided)
+    DOMAINS = read_domains(args.domains_tsv)
+
+    # Split FASTA into separate seq.fa files (safe/unique dir names; original headers preserved)
     split_fasta(args.input_fasta, args.temp_dir)
 
     # Set global arguments for process_dir
@@ -359,5 +552,4 @@ if __name__ == "__main__":
         shutil.rmtree(args.temp_dir)
 
     print(f"All sequences processed. Output in {args.outfile}")
-    
-  
+

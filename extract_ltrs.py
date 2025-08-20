@@ -54,11 +54,11 @@ def main():
     header, seq = parse_fasta(args.fasta)
     seq_len = len(seq)
 
-    # Unadjusted lengths
+    # Unadjusted lengths (1-based inclusive coordinates from TSV)
     len5p = max_end1
     len3p = seq_len - (min_start2 - 1)
 
-    # Equalize LTR lengths
+    # Equalize LTR lengths by expanding the shorter inward (toward the center)
     new_end1 = max_end1
     new_start2 = min_start2
 
@@ -73,7 +73,7 @@ def main():
         if new_start2 < 1:
             new_start2 = 1
 
-    # Apply extension
+    # Apply symmetric extension
     new_end1 += args.extend
     if new_end1 > seq_len:
         new_end1 = seq_len
@@ -82,9 +82,34 @@ def main():
     if new_start2 < 1:
         new_start2 = 1
 
-    # Extract LTRs
-    ltr_5p = seq[0:new_end1]
-    ltr_3p = seq[new_start2 - 1:]
+    # ---- SAFETY CHECK: prevent overlap by enforcing a maximum equal length ----
+    # Proposed lengths after extension/clipping
+    prop_len_5p = new_end1  # 1..new_end1  (inclusive)
+    prop_len_3p = seq_len - new_start2 + 1  # new_start2..seq_len (inclusive)
+
+    # Absolute maximum to avoid overlap is half the sequence length (floor)
+    max_len_no_overlap = seq_len // 2
+
+    # Final equal LTR length we can support without overlap and without exceeding proposed lengths
+    final_len = min(max_len_no_overlap, prop_len_5p, prop_len_3p)
+
+    # If we had to snip anything down, warn to stderr
+    if final_len < prop_len_5p or final_len < prop_len_3p:
+        print(
+            f"WARNING: LTRs would overlap after extension. "
+            f"Snipping to {final_len} bp each (max allowed: {max_len_no_overlap}).",
+            file=sys.stderr
+        )
+
+    # Recompute coordinates symmetrically to guarantee equal length and no overlap
+    # 5' LTR: 1..final_len
+    # 3' LTR: (seq_len - final_len + 1)..seq_len
+    new_end1 = final_len
+    new_start2 = seq_len - final_len + 1
+
+    # Extract LTR sequences
+    ltr_5p = seq[0:new_end1]  # Python slice end is exclusive; new_end1 is 1-based inclusive
+    ltr_3p = seq[new_start2 - 1:]  # start index is 0-based
 
     # Write output
     with open(args.output, 'w') as out:
@@ -95,4 +120,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
