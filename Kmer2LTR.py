@@ -28,6 +28,20 @@ def sanitize_name(name: str) -> str:
         safe = f"header_{abs(hash(name))}"
     return safe
 
+def sum_ungapped_bp(fasta_path: Path) -> int:
+    """
+    Count total basepairs across all sequences in a FASTA, excluding gaps ('-').
+    Headers ('>') and whitespace are ignored.
+    """
+    total = 0
+    with open(fasta_path) as fh:
+        for line in fh:
+            if not line or line.startswith(">"):
+                continue
+            s = line.strip()
+            # count all non-gap characters
+            total += sum(1 for c in s if c != "-")
+    return total
 
 def has_data_rows(path: Path) -> bool:
     """
@@ -71,40 +85,6 @@ def run_cmd_output(cmd, output_path, stderr=None, verbose=False):
             print("Running:", cmd, ">", output_path)
     with open(output_path, "w") as out:
         subprocess.run(cmd, shell=not isinstance(cmd, list), stdout=out, stderr=stderr, check=True)
-
-
-def contains_internal_gaps(fasta_path: Path) -> bool:
-    """
-    Return True if any sequence in the FASTA has an internal gap ('-'
-    after trimming leading/trailing gaps). Whitespace is ignored.
-
-    MAFFT and trimal might try to build an alignment where it doesnt exist.
-    A true LTR alignment ought not have internal gaps, but I may to lossen it for highly diveregend sequences.
-    This step aims to filter out bogus results.
-
-    This seems most helpful if an input seq is not actually an LTR-RT, but happens to have some shared kmers.
-    """
-    c = 0
-    header = None
-    seq_chunks = []
-    with open(fasta_path) as it:
-        for l in it:
-            if l.startswith('>'):
-                if header is not None:
-                    t = re.sub(r'\s+', '', ''.join(seq_chunks))
-                    if '-' in t.strip('-'):
-                        c += 1
-                header = l
-                seq_chunks = []
-            else:
-                seq_chunks.append(l.strip())
-        # flush last
-        if header is not None:
-            t = re.sub(r'\s+', '', ''.join(seq_chunks))
-            if '-' in t.strip('-'):
-                c += 1
-    return c > 0
-
 
 def read_domains(domains_tsv: str):
     """
@@ -367,15 +347,6 @@ def process_dir(dir_path):
     run_cmd_output([
         "mafft", "--auto", "--thread", "1", str(ltrs_fa)
     ], aln_fa, stderr=subprocess.DEVNULL, verbose=verbose)
-    
-    # Short-circuit if MAFFT introduces internal gaps (likely bogus alignment)
-    if contains_internal_gaps(aln_fa):
-        print(f"[SKIP] Internal gaps detected after MAFFT for {dir_path.name} ({aln_fa}).")
-        try:
-            (dir_path / "SKIPPED.internal_gaps").write_text("")
-        except Exception:
-            pass
-        return
 
     run_cmd([
         "trimal",
@@ -384,6 +355,36 @@ def process_dir(dir_path):
         "-in", str(aln_fa),
         "-out", str(dir_path / "LTRs.aln.clean")
     ], verbose)
+
+    # ----- Short-circuit if trimmed alignment is too short vs raw alignment -----
+    # MAFFT and trimal dont filter spurious likely false positives.
+    # This is aimed at conservatively cleaning some false positives.
+    # 0.6 is used, but may need adjusted.
+    try:
+        raw_bp = sum_ungapped_bp(aln_fa)                 # from "LTRs.aln.fa"
+        clean_bp = sum_ungapped_bp(dir_path / "LTRs.aln.clean")  # from "LTRs.aln.clean"
+    except FileNotFoundError as e:
+        print(f"[SKIP] Missing alignment file for {dir_path.name}: {e}")
+        try:
+            (dir_path / "SKIPPED.missing_alignment").write_text(str(e))
+        except Exception:
+            pass
+        return
+
+    # Require: sum_bp(clean) + extension > 0.6 * sum_bp(raw)
+    threshold = 0.6 * raw_bp
+    if (clean_bp + extension) <= threshold:
+        print(
+            f"[SKIP] Trimmed alignment too short for {dir_path.name}: "
+            f"clean_bp({clean_bp}) + ext({extension}) <= 0.6 * raw_bp({raw_bp:.0f})"
+        )
+        try:
+            (dir_path / "SKIPPED.too_trimmed").write_text(
+                f"raw_bp={raw_bp}\nclean_bp={clean_bp}\nextension={extension}\nthreshold={threshold}\n"
+            )
+        except Exception:
+            pass
+        return
 
     # Final WFA and append results
     cmd_str = (
