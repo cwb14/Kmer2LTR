@@ -195,11 +195,36 @@ def read_seq_string(seq_fa: Path) -> str:
     return "".join(seq_chunks)
 
 
+def parse_proposed_ltr_len_from_aln(aln_fa: Path) -> int | None:
+    """
+    Look for a 5' header line like:
+    >... 5p:1-2688
+    Return the integer (e.g., 2688) or None if not found.
+    """
+    try:
+        with open(aln_fa) as fh:
+            for line in fh:
+                if not line.startswith(">"):
+                    continue
+                # tolerate tabs/spaces; search only the 5p tag
+                m = re.search(r"5p:1-(\d+)", line)
+                if m:
+                    return int(m.group(1))
+    except FileNotFoundError:
+        return None
+    return None
+
+
 def try_fast_path(dir_path: Path, header_token: str, seq_len: int) -> bool:
     """
-    Try fast-path extraction + WFA if domains info is available and safety checks pass.
-    Returns True if fast-path executed (regardless of WFA success/exception),
-    False if we should run the full pipeline.
+    Fast-path when domains TSV provides LTR length:
+      - Safety checks (unchanged)
+      - Extract first/last min(ltr_len + extension, seq_len//2) bp
+      - Write LTRs.fa
+      - Run MAFFT -> trimal -> WFA, then append to main outfile
+
+    Returns True if fast-path executed (regardless of downstream success/exception),
+    False if we should run the full k-mer pipeline.
     """
     global ARGS, DOMAINS
     if not DOMAINS:
@@ -216,37 +241,87 @@ def try_fast_path(dir_path: Path, header_token: str, seq_len: int) -> bool:
 
     ltr_len = DOMAINS[header_token]
 
-    # Safety check: length_of_element > 2*ltr_len + 50
+    # Safety check: length_of_element > 2*ltr_len + 50 (unchanged)
     if not (seq_len > (2 * ltr_len + 50)):
         if ARGS.verbose:
             print(f"[FAST-PATH SKIP] Safety check failed for '{header_token}': "
                   f"seq_len={seq_len} <= 2*{ltr_len}+50")
         return False
 
-    # Perform direct extraction
-    seq = read_seq_string(dir_path / "seq.fa")
-    five_p = seq[:ltr_len]
-    three_p = seq[-ltr_len:]
+    # Determine extraction length: min(ltr_len + extension, seq_len//2)
+    ext_len = ltr_len + ARGS.extension
+    cap = seq_len // 2
+    if ext_len > cap:
+        ext_len = cap
 
-    # Create the file that the WFA step expects
-    aln_clean = dir_path / "LTRs.aln.clean"
-    with open(aln_clean, "w") as out:
-        out.write(f">{header_token}_5prime_LTR_len{ltr_len}\n")
+    # Perform direct extraction into LTRs.fa (not aln.clean)
+    seq = read_seq_string(dir_path / "seq.fa")
+    five_p = seq[:ext_len]
+    three_p = seq[-ext_len:]
+
+    ltrs_fa = dir_path / "LTRs.fa"
+    with open(ltrs_fa, "w") as out:
+        out.write(f">{header_token}_5prime_LTR_len{ltr_len}_ext{ext_len}\n")
         out.write(five_p + "\n")
-        out.write(f">{header_token}_3prime_LTR_len{ltr_len}\n")
+        out.write(f">{header_token}_3prime_LTR_len{ltr_len}_ext{ext_len}\n")
         out.write(three_p + "\n")
 
     if ARGS.verbose:
-        print(f"[FAST-PATH] {dir_path.name}: extracted 5′/3′ LTRs (len={ltr_len}) directly from domains TSV.")
+        print(f"[FAST-PATH] {dir_path.name}: extracted 5′/3′ ({ext_len} bp each) using domains TSV (LTR={ltr_len}, ext={ARGS.extension}).")
 
-    # Run WFA on the two LTRs and append to main outfile
+    # Align and trim (MAFFT -> trimal)
+    aln_fa = dir_path / "LTRs.aln.fa"
+    run_cmd_output([
+        "mafft", "--auto", "--thread", "1", str(ltrs_fa)
+    ], aln_fa, stderr=subprocess.DEVNULL, verbose=ARGS.verbose)
+
+    run_cmd([
+        "trimal",
+        "-automated1",
+        "-keepheader",
+        "-in", str(aln_fa),
+        "-out", str(dir_path / "LTRs.aln.clean")
+    ], ARGS.verbose)
+
+    # Short-circuit if trimmed alignment is too short vs raw alignment
+    try:
+        raw_bp = sum_ungapped_bp(aln_fa)
+        clean_bp = sum_ungapped_bp(dir_path / "LTRs.aln.clean")
+    except FileNotFoundError as e:
+        print(f"[SKIP] Missing alignment file for {dir_path.name}: {e}")
+        try:
+            (dir_path / "SKIPPED.missing_alignment").write_text(str(e))
+        except Exception:
+            pass
+        return True  # fast-path executed, even if skipped downstream
+
+    threshold = 0.6 * raw_bp
+    if (clean_bp + ARGS.extension) <= threshold:
+        print(
+            f"[SKIP] Trimmed alignment too short for {dir_path.name}: "
+            f"clean_bp({clean_bp}) + ext({ARGS.extension}) <= 0.6 * raw_bp({raw_bp:.0f})"
+        )
+        try:
+            (dir_path / "SKIPPED.too_trimmed").write_text(
+                f"raw_bp={raw_bp}\nclean_bp={clean_bp}\nextension={ARGS.extension}\nthreshold={threshold}\n"
+            )
+        except Exception:
+            pass
+        return True  # fast-path executed, but result skipped
+
+
+    # Fast-path: use DOMAINS_TSV value directly, do NOT subtract extension
+    reported_len = ltr_len
+
+    # Final WFA and append results (same filtering as heavy path)
     cmd_str = (
-        f"{SCRIPT_DIR / 'wfa'} -E 10000 -e 10000 -o 10000 -O 10000 -u {ARGS.mutation_rate} {aln_clean}"
+        f"{SCRIPT_DIR / 'wfa'} -E 10000 -e 10000 -o 10000 -O 10000 -u {ARGS.mutation_rate} {dir_path / 'LTRs.aln.clean'}"
         " | cut -f1,5- | sed -e 's/-0\\.000000/0.000000/g' | "
-        "awk -F'\t' '{if($1~/_(5prime|3prime)/) sub(/_(5prime|3prime).*$/, \"\", $1); print}' OFS='\t' | " # trim off temp suffix.
-        "awk '$6 <= 0.35' " # p-dist > 0.35 is likely a false positive.
+        "awk -F'\t' '{if($1~/_(5prime|3prime)/) sub(/_(5prime|3prime).*$/, \"\", $1); print}' OFS='\t' | "
+        "awk '$6 <= 0.35' | "
+        f"awk -v P={reported_len} 'BEGIN{{OFS=\"\\t\"}} {{for(i=NF;i>=2;i--) $(i+1)=$(i); $2=P; print}}' "
     )
-    
+
     if ARGS.verbose:
         print("Running:", cmd_str)
     with open(ARGS.outfile, "a") as ofile:
@@ -258,7 +333,8 @@ def try_fast_path(dir_path: Path, header_token: str, seq_len: int) -> bool:
 def process_dir(dir_path):
     """
     Process one sequence directory:
-      - If domains TSV provides a safe fast-path, extract LTRs directly and run WFA.
+      - If domains TSV provides a safe fast-path, extract LTRs directly with extension,
+        then run MAFFT -> trimal -> WFA.
       - Otherwise run the original heavy pipeline (k-mers -> map -> filter -> extract LTRs -> MAFFT -> trimal -> WFA).
     """
     args = ARGS
@@ -386,11 +462,23 @@ def process_dir(dir_path):
             pass
         return
 
+    # Compute proposed LTR len from LTRs.aln.fa headers and adjust by extension
+    proposed_len = parse_proposed_ltr_len_from_aln(aln_fa)
+    if proposed_len is None:
+        proposed_adj = 0
+        if ARGS.verbose:
+            print(f"[WARN] Could not parse proposed LTR length for {dir_path.name}; inserting 0.")
+    else:
+        proposed_adj = max(proposed_len - ARGS.extension, 0)
+
+
     # Final WFA and append results
     cmd_str = (
         f"{SCRIPT_DIR / 'wfa'} -E 10000 -e 10000 -o 10000 -O 10000 -u {args.mutation_rate} {dir_path / 'LTRs.aln.clean'}"
         " | cut -f1,5- | sed -e 's/-0\\.000000/0.000000/g' | "
-        "awk '$6 <= 0.35' " # Filter out likely false positives.
+        "awk -F'\t' '{if($1~/_(5prime|3prime)/) sub(/_(5prime|3prime).*$/, \"\", $1); print}' OFS='\t' | "
+        "awk '$6 <= 0.35' | " # Filter out likely false positives.
+        f"awk -v P={proposed_adj} 'BEGIN{{OFS=\"\\t\"}} {{for(i=NF;i>=2;i--) $(i+1)=$(i); $2=P; print}}' "
     )
 
     if verbose:
@@ -404,9 +492,10 @@ def write_summary(main_out_path: str):
     Read the main outfile (one row per element), sum length/transition/transversion,
     and write pooled distances to '<outfile>.summary'.
 
-    Columns (no header):
-    1 LTR-RT  2 LTR_LEN  3 substitutions  4 transitions  5 transversions
-    6 p-dist  7 p-time   8 JC69-dist      9 JC69-time     10 K2P-dist   11 K2P-time
+    Columns (no header) AFTER the new insertion:
+    1 LTR-RT  2 proposed_len_minus_ext  3 LTR_LEN  4 substitutions
+    5 transitions  6 transversions  7 p-dist  8 p-time
+    9 JC69-dist  10 JC69-time  11 K2P-dist  12 K2P-time
     """
     total_len = 0
     total_ts = 0.0
@@ -418,12 +507,14 @@ def write_summary(main_out_path: str):
             if not line:
                 continue
             parts = line.split()
-            if len(parts) < 11:
+            # need at least 12 columns now
+            if len(parts) < 12:
                 continue
             try:
-                L = int(parts[1])
-                ts = float(parts[3])
-                tv = float(parts[4])
+                # NOTE: indexes shifted by +1 due to new column at position 2
+                L = int(parts[2])             # LTR_LEN now in column 3
+                ts = float(parts[4])          # transitions now in column 5
+                tv = float(parts[5])          # transversions now in column 6
             except ValueError:
                 continue
             total_len += L
@@ -510,9 +601,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "-D", "--domains", dest="domains_tsv", default=None,
-        help="Optional TSV (name\\tLTR_len). If provided, sequences whose names "
-             "appear here and pass safety checks will skip k-mer/MAFFT/trimal and "
-             "go straight to WFA using the first/last LTR_len bp."
+        help="Optional TSV (name\\tLTR_len). If provided, skip LTR discovery and go stright to alignment"
     )
     parser.add_argument(
         "input_fasta",
@@ -553,4 +642,3 @@ if __name__ == "__main__":
         shutil.rmtree(args.temp_dir)
 
     print(f"All sequences processed. Output in {args.outfile}")
-
