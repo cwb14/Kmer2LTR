@@ -45,14 +45,14 @@ Gypsy1#LTR_Ty3	584  574	131	109	22	0.228223	3803717	0.272125	4535411	0.290682	48
 Gypsy2#LTR_Ty3  260  260	55	47	8	0.211538	3525641	0.248518	4141964	0.264922	4415361
 Gypsy3#LTR_Ty3  741  744	180	137	43	0.241935	4032258	0.292099	4868310	0.308338	5138959
 ```
-`LTR_LEN` is whats discovered via kmer.  
+`LTR_LEN` is whats discovered via kmer (or provided in the domains file).  
 `ALN_LEN` is the length of aligned bases.  
 `LTR_LEN` may be less than or greater than `ALN_LEN`.  
 `LTR_LEN` > `ALN_LEN` if gaps in LTR.   
 `LTR_LEN` < `ALN_LEN` if extension expands the LTR boundry discovered by kmer.   
 
 
-
+`OUTFILE` can be directly used as `DOMAINS_TSV`.
 
 
 
@@ -67,10 +67,8 @@ Gypsy3#LTR_Ty3  741  744	180	137	43	0.241935	4032258	0.292099	4868310	0.308338	5
 
 
 # Developers note.
-TESS-PrinTE makes `lib_clean.fa` with LTR length in the header.   
-All LTRs are unmutated.   
-
-PIPELINE OUTLINE: (1) Use kmers to identify LTR boundry from LTR-RTs. (2) Force global alignment of LTRs (gaps penalized to promote subsitution).  
+TESS-PrinTE makes `lib_clean.fa` with LTR length in the header. All LTRs are unmutated. 
+Other libraries in TESS are also helpful: `maizeTE02052020.ltr.full`, `rice7.0.0.liban.ltr.full`, `ltr-db.fa`, `athrep.updated.fasta_062024.ltr.full`.
 
 For benchmarking the pipeline, I can:
 ```
@@ -79,55 +77,6 @@ python lib_mutator.py -i lib_clean.fa -o lib_clean.15mp.titv2.fa -mp 15 -TiTv 2 
 LTRs are 15% mutated. TiTv ratio = 2. 
 Internal sequence is not mutated. 
 
-This new kmer2ltr pipeline has issues with ':' and '/' in header. 
-I will fix if the pipeline is adopted. 
-But for now...
-```
-cat lib_clean.15mp.titv2.fa | sed 's/\//_/g' | sed 's/LTRlen:/LTRlen/g' > lib_clean.15mp.titv2.clean.fa
-```
-
-Run the pipeline.
-```
-nohup /usr/bin/time -v python Kmer2LTR.py -p 100 lib_clean.15mp.titv2.clean.fa &
-```
-Default parameters seem fairly optimized. 
-
-How many does it match in full length?
-```
-awk -F'\t' '{ split($1, a, /[a-zA-Z_~#-]+/); n=a[length(a)]; if (n == $2) c++ } END { print c }' LTRs.alns.results
-```
-83%
-
-How many does it get within 20bp?
-```
-awk -F'\t' '{ split($1,a,/[a-zA-Z_~#-]+/); n=a[length(a)]+0; if (n>=($2-20) && n<=($2+20)) c++ } END{print c}' LTRs.alns.results
-```
-89%
-
-Not bad for 30% divergence (15% * 2).
-
-Performance.
-P-distance (raw div).
-```
-awk '{a[NR]=$6; sum+=$6} END {n=asort(a); median=(n%2 ? a[(n+1)/2] : (a[n/2]+a[n/2+1])/2); print "Mean:", sum/n, "Median:", median}' LTRs.alns.results
-```
-Mean: 0.24198 Median: 0.244444
-
-JC69.
-```
-awk '{a[NR]=$8; sum+=$8} END {n=asort(a); median=(n%2 ? a[(n+1)/2] : (a[n/2]+a[n/2+1])/2); print "Mean:", sum/n, "Median:", median}'
-LTRs.alns.results
-```
-Mean: 0.293474 Median: 0.295789
-
-K2P.
-```
-awk '{a[NR]=$10; sum+=$10} END {n=asort(a); median=(n%2 ? a[(n+1)/2] : (a[n/2]+a[n/2+1])/2); print "Mean:", sum/n, "Median:", median}' LTRs.alns.results
-```
-Mean: 0.295765 Median: 0.297855
-
-
 Runtime.
-With 100 threads, it processes 20,571 LTR-RTs in 27m:7s.
-
-Idea: Calculate and report p-dist, JC69-dist, and K2P-dist for all LTR-RTs as a single composite measurment using the sum of all lengths, sum of all transversions, etc. this might be better than taking the mean of all LTR-RT divergencews. 
+With 100 threads, it processes 20,703 LTR-RTs in 25m:22s.
+With DOMAINS_TSV provided, and 100 threads, it processes those 20,703 LTR-RTs in 3m:28s.
