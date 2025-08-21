@@ -8,6 +8,9 @@ import math
 from multiprocessing import Pool
 from pathlib import Path
 import re
+import shlex
+
+q = shlex.quote
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
 
@@ -15,15 +18,30 @@ SCRIPT_DIR = Path(__file__).parent.resolve()
 ARGS = None
 DOMAINS = None  # dict[str,int] or None
 
-
 def sanitize_name(name: str) -> str:
     """
-    Make a filesystem-safe folder name from a FASTA header token.
-    Replaces path separators with a Unicode division slash '∕' (U+2215).
-    Also strips trailing dots/spaces which can be problematic on some FS.
+    Make a filesystem- and shell-safe folder name from a FASTA header token.
+    - Replace path separators with Unicode division slash '∕' (U+2215).
+    - Replace shell metacharacters with visually similar fullwidth variants or underscores.
+    - Strip trailing dots/spaces which can be problematic on some FS.
     """
-    safe = name.replace("/", "∕").replace("\\", "∕")
-    safe = safe.strip()
+    # Friendly translations for the worst offenders
+    trans = str.maketrans({
+        "/": "∕",
+        "\\": "∕",
+        ":": "꞉",   # U+A789 modifier letter colon (or use "：" U+FF1A)
+        ";": "；",   # fullwidth semicolon
+        "&": "＆",
+        "|": "︱",
+        " ": "_",
+    })
+    safe = name.translate(trans)
+
+    # Replace any remaining unsafe characters with underscore
+    safe = re.sub(r"[<>?*'\"`$(){}\[\]#\t\n\r]", "_", safe)
+
+    # Trim and guard reserved names
+    safe = safe.strip().rstrip(".")
     if safe in {".", "..", ""}:
         safe = f"header_{abs(hash(name))}"
     return safe
@@ -218,7 +236,7 @@ def parse_proposed_ltr_len_from_aln(aln_fa: Path) -> int | None:
 def try_fast_path(dir_path: Path, header_token: str, seq_len: int) -> bool:
     """
     Fast-path when domains TSV provides LTR length:
-      - Safety checks (unchanged)
+      - Safety checks 
       - Extract first/last min(ltr_len + extension, seq_len//2) bp
       - Write LTRs.fa
       - Run MAFFT -> trimal -> WFA, then append to main outfile
@@ -230,14 +248,14 @@ def try_fast_path(dir_path: Path, header_token: str, seq_len: int) -> bool:
     if not DOMAINS:
         return False
 
-    # Duplicate name? -> uncertain mapping -> full pipeline
-    if (dir_path / "DUPLICATE_NAME").exists():
+    # Duplicate name? -> uncertain mapping -> full pipeline unless user overrides.
+    if (dir_path / "DUPLICATE_NAME").exists() and not ARGS.assume_dup_same_ltr:
         if ARGS.verbose:
-            print(f"[FAST-PATH SKIP] Duplicate header name detected for '{header_token}'.")
+            print(f"[FAST-PATH SKIP] Duplicate header name detected for '{header_token}'. "
+                  f"Use --assume-duplicate-same-ltr to override (risky).")
         return False
-
-    if header_token not in DOMAINS:
-        return False
+    # If ARGS.assume_dup_same_ltr is True, proceed assuming all duplicates with this
+    # header token share the same LTR length from DOMAINS.
 
     ltr_len = DOMAINS[header_token]
 
@@ -295,15 +313,18 @@ def try_fast_path(dir_path: Path, header_token: str, seq_len: int) -> bool:
             pass
         return True  # fast-path executed, even if skipped downstream
 
-    threshold = 0.6 * raw_bp
+
+    threshold = args.min_retained_fraction * raw_bp
     if (clean_bp + ARGS.extension) <= threshold:
         print(
             f"[SKIP] Trimmed alignment too short for {dir_path.name}: "
-            f"clean_bp({clean_bp}) + ext({ARGS.extension}) <= 0.6 * raw_bp({raw_bp:.0f})"
+            f"clean_bp({clean_bp}) + ext({extension}) <= "
+            f"{args.min_retained_fraction:.3f} * raw_bp({raw_bp:.0f})"
         )
         try:
             (dir_path / "SKIPPED.too_trimmed").write_text(
-                f"raw_bp={raw_bp}\nclean_bp={clean_bp}\nextension={ARGS.extension}\nthreshold={threshold}\n"
+                f"raw_bp={raw_bp}\nclean_bp={clean_bp}\nextension={extension}\n"
+                f"min_retained_fraction={args.min_retained_fraction}\nthreshold={threshold}\n"
             )
         except Exception:
             pass
@@ -315,7 +336,8 @@ def try_fast_path(dir_path: Path, header_token: str, seq_len: int) -> bool:
 
     # Final WFA and append results (same filtering as heavy path)
     cmd_str = (
-        f"{SCRIPT_DIR / 'wfa'} -E 10000 -e 10000 -o 10000 -O 10000 -u {ARGS.mutation_rate} {dir_path / 'LTRs.aln.clean'}"
+        f"{q(str(SCRIPT_DIR / 'wfa'))} -E 10000 -e 10000 -o 10000 -O 10000 -u {ARGS.mutation_rate} "
+        f"{q(str(dir_path / 'LTRs.aln.clean'))}"
         " | cut -f1,5- | sed -e 's/-0\\.000000/0.000000/g' | "
         "awk -F'\t' '{if($1~/_(5prime|3prime)/) sub(/_(5prime|3prime).*$/, \"\", $1); print}' OFS='\t' | "
         "awk '$6 <= 0.35' | "
@@ -435,7 +457,7 @@ def process_dir(dir_path):
     # ----- Short-circuit if trimmed alignment is too short vs raw alignment -----
     # MAFFT and trimal dont filter spurious likely false positives.
     # This is aimed at conservatively cleaning some false positives.
-    # 0.6 is used, but may need adjusted.
+    # Threshold is configurable via --min-retained-fraction (default 0.6).
     try:
         raw_bp = sum_ungapped_bp(aln_fa)                 # from "LTRs.aln.fa"
         clean_bp = sum_ungapped_bp(dir_path / "LTRs.aln.clean")  # from "LTRs.aln.clean"
@@ -447,16 +469,19 @@ def process_dir(dir_path):
             pass
         return
 
-    # Require: sum_bp(clean) + extension > 0.6 * sum_bp(raw)
-    threshold = 0.6 * raw_bp
+    # Require: sum_bp(clean) + extension > (min_retained_fraction * sum_bp(raw))
+    threshold = args.min_retained_fraction * raw_bp
+    
     if (clean_bp + extension) <= threshold:
         print(
             f"[SKIP] Trimmed alignment too short for {dir_path.name}: "
-            f"clean_bp({clean_bp}) + ext({extension}) <= 0.6 * raw_bp({raw_bp:.0f})"
+            f"clean_bp({clean_bp}) + ext({extension}) <= "
+            f"{args.min_retained_fraction:.3f} * raw_bp({raw_bp:.0f})"
         )
         try:
             (dir_path / "SKIPPED.too_trimmed").write_text(
-                f"raw_bp={raw_bp}\nclean_bp={clean_bp}\nextension={extension}\nthreshold={threshold}\n"
+                f"raw_bp={raw_bp}\nclean_bp={clean_bp}\nextension={extension}\n"
+                f"min_retained_fraction={args.min_retained_fraction}\nthreshold={threshold}\n"
             )
         except Exception:
             pass
@@ -474,18 +499,17 @@ def process_dir(dir_path):
 
     # Final WFA and append results
     cmd_str = (
-        f"{SCRIPT_DIR / 'wfa'} -E 10000 -e 10000 -o 10000 -O 10000 -u {args.mutation_rate} {dir_path / 'LTRs.aln.clean'}"
+        f"{q(str(SCRIPT_DIR / 'wfa'))} -E 10000 -e 10000 -o 10000 -O 10000 -u {args.mutation_rate} "
+        f"{q(str(dir_path / 'LTRs.aln.clean'))}"
         " | cut -f1,5- | sed -e 's/-0\\.000000/0.000000/g' | "
         "awk -F'\t' '{if($1~/_(5prime|3prime)/) sub(/_(5prime|3prime).*$/, \"\", $1); print}' OFS='\t' | "
-        "awk '$6 <= 0.35' | " # Filter out likely false positives.
+        "awk '$6 <= 0.35' | "
         f"awk -v P={proposed_adj} 'BEGIN{{OFS=\"\\t\"}} {{for(i=NF;i>=2;i--) $(i+1)=$(i); $2=P; print}}' "
     )
-
     if verbose:
         print("Running:", cmd_str)
     with open(out_file, "a") as ofile:
         subprocess.run(cmd_str, shell=True, check=True, stdout=ofile)
-
 
 def write_summary(main_out_path: str):
     """
@@ -606,6 +630,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "input_fasta",
         help="Path to multi-sequence LTR-RT FASTA file."
+    )
+    parser.add_argument(
+        "--min-retained-fraction", type=float, default=0.6, dest="min_retained_fraction",
+        help="Minimum fraction of ungapped columns retained after trimming required to proceed (default: 0.6)."
+    )
+    parser.add_argument(
+        "--assume-duplicate-same-ltr", action="store_true", dest="assume_dup_same_ltr",
+        help="Override duplicate-header safety fallback in fast path. Assumes all duplicate header tokens share the same LTR length from the domains TSV. Use with caution."
     )
 
     args = parser.parse_args()
