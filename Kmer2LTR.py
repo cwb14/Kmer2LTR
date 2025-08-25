@@ -9,6 +9,8 @@ from multiprocessing import Pool
 from pathlib import Path
 import re
 import shlex
+import sys
+import time
 
 q = shlex.quote
 
@@ -17,6 +19,7 @@ SCRIPT_DIR = Path(__file__).parent.resolve()
 # Global args/domains placeholders
 ARGS = None
 DOMAINS = None  # dict[str,int] or None
+LOGFILE = None
 
 def sanitize_name(name: str) -> str:
     """
@@ -61,6 +64,15 @@ def sum_ungapped_bp(fasta_path: Path) -> int:
             total += sum(1 for c in s if c != "-")
     return total
 
+def _format_hms(seconds: float) -> str:
+    """Return 'Hh:Mm:Ss' for a nonnegative seconds value."""
+    if not math.isfinite(seconds) or seconds < 0:
+        return "0h:0m:0s"
+    s = int(round(seconds))
+    h, s = divmod(s, 3600)
+    m, s = divmod(s, 60)
+    return f"{h}h:{m}m:{s}s"
+
 def has_data_rows(path: Path) -> bool:
     """
     True if file exists and contains at least one non-empty, non-header line.
@@ -79,6 +91,12 @@ def has_data_rows(path: Path) -> bool:
         return False
     return False
 
+def log_msg(msg: str):
+    """Write warnings/skips/etc. to the logfile instead of cluttering stderr."""
+    global LOGFILE
+    if LOGFILE:
+        LOGFILE.write(msg.strip() + "\n")
+        LOGFILE.flush()
 
 def run_cmd(cmd, verbose):
     """
@@ -316,7 +334,8 @@ def try_fast_path(dir_path: Path, header_token: str, seq_len: int) -> bool:
 
     threshold = args.min_retained_fraction * raw_bp
     if (clean_bp + ARGS.extension) <= threshold:
-        print(
+        log_msg(
+        #print(
             f"[SKIP] Trimmed alignment too short for {dir_path.name}: "
             f"clean_bp({clean_bp}) + ext({extension}) <= "
             f"{args.min_retained_fraction:.3f} * raw_bp({raw_bp:.0f})"
@@ -369,7 +388,8 @@ def process_dir(dir_path):
     extension = args.extension
 
     dir_path = Path(dir_path)
-    print(f"Processing {dir_path}")
+    if ARGS.verbose:
+        print(f"Processing {dir_path}")
     seq_fa = dir_path / "seq.fa"
     # Header token (the same notion used for domains lookup)
     with open(seq_fa) as fh:
@@ -473,7 +493,8 @@ def process_dir(dir_path):
     threshold = args.min_retained_fraction * raw_bp
     
     if (clean_bp + extension) <= threshold:
-        print(
+        log_msg(
+        #print(
             f"[SKIP] Trimmed alignment too short for {dir_path.name}: "
             f"clean_bp({clean_bp}) + ext({extension}) <= "
             f"{args.min_retained_fraction:.3f} * raw_bp({raw_bp:.0f})"
@@ -650,6 +671,8 @@ if __name__ == "__main__":
 
     # Load domains mapping (if provided)
     DOMAINS = read_domains(args.domains_tsv)
+    
+    LOGFILE = open(args.outfile + ".log", "w")
 
     # Split FASTA into separate seq.fa files (safe/unique dir names; original headers preserved)
     split_fasta(args.input_fasta, args.temp_dir)
@@ -660,9 +683,36 @@ if __name__ == "__main__":
     # Discover sequence directories
     dirs = [str(p) for p in Path(args.temp_dir).iterdir() if p.is_dir()]
 
-    # Process in parallel
+    # Process in parallel with live progress/ETA (single updating line on stderr)
+    total = len(dirs)
+    start = time.monotonic()
+    last_update = 0.0  # throttle screen updates
+    update_interval = 0.25  # seconds between redraws (tweak as desired)
+
+    # We iterate results so we can update the counter as work completes
+    completed = 0
+    print("", file=sys.stderr)  # ensure stderr stream exists
+
     with Pool(processes=args.threads) as pool:
-        pool.map(process_dir, dirs)
+        # chunksize=1 gives smoother progress; increase for less overhead
+        for _ in pool.imap_unordered(process_dir, dirs, chunksize=1):
+            completed += 1
+            now = time.monotonic()
+            if (now - last_update) >= update_interval or completed == total:
+                elapsed = now - start
+                pct = (completed / total) * 100 if total else 100.0
+                rate = (completed / elapsed) if elapsed > 0 else 0.0
+                remaining = ((total - completed) / rate) if rate > 0 else float("inf")
+                eta_text = _format_hms(remaining)
+
+                # Carriage return to redraw the same line; no newline
+                msg = (f"\rProcessing {completed}/{total}. "
+                    f"{pct:.2f}% complete. Estimated time remaining {eta_text}")
+                print(msg, end="", file=sys.stderr, flush=True)
+                last_update = now
+
+    # finish the progress line with a newline
+    print("", file=sys.stderr)
 
     write_summary(args.outfile)
 
@@ -674,3 +724,6 @@ if __name__ == "__main__":
         shutil.rmtree(args.temp_dir)
 
     print(f"All sequences processed. Output in {args.outfile}")
+    
+    if LOGFILE:
+        LOGFILE.close()
