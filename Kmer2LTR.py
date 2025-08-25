@@ -11,6 +11,7 @@ import re
 import shlex
 import sys
 import time
+from copy import deepcopy
 
 q = shlex.quote
 
@@ -275,6 +276,9 @@ def try_fast_path(dir_path: Path, header_token: str, seq_len: int) -> bool:
     # If ARGS.assume_dup_same_ltr is True, proceed assuming all duplicates with this
     # header token share the same LTR length from DOMAINS.
 
+    if header_token not in DOMAINS:
+        return False
+
     ltr_len = DOMAINS[header_token]
 
     # Safety check: length_of_element > 2*ltr_len + 50 (unchanged)
@@ -331,24 +335,21 @@ def try_fast_path(dir_path: Path, header_token: str, seq_len: int) -> bool:
             pass
         return True  # fast-path executed, even if skipped downstream
 
-
-    threshold = args.min_retained_fraction * raw_bp
+    threshold = ARGS.min_retained_fraction * raw_bp
     if (clean_bp + ARGS.extension) <= threshold:
         log_msg(
-        #print(
             f"[SKIP] Trimmed alignment too short for {dir_path.name}: "
-            f"clean_bp({clean_bp}) + ext({extension}) <= "
-            f"{args.min_retained_fraction:.3f} * raw_bp({raw_bp:.0f})"
+            f"clean_bp({clean_bp}) + ext({ARGS.extension}) <= "
+            f"{ARGS.min_retained_fraction:.3f} * raw_bp({raw_bp:.0f})"
         )
         try:
             (dir_path / "SKIPPED.too_trimmed").write_text(
-                f"raw_bp={raw_bp}\nclean_bp={clean_bp}\nextension={extension}\n"
-                f"min_retained_fraction={args.min_retained_fraction}\nthreshold={threshold}\n"
+                f"raw_bp={raw_bp}\nclean_bp={clean_bp}\nextension={ARGS.extension}\n"
+                f"min_retained_fraction={ARGS.min_retained_fraction}\nthreshold={threshold}\n"
             )
         except Exception:
             pass
         return True  # fast-path executed, but result skipped
-
 
     # Fast-path: use DOMAINS_TSV value directly, do NOT subtract extension
     reported_len = ltr_len
@@ -393,7 +394,7 @@ def process_dir(dir_path):
     seq_fa = dir_path / "seq.fa"
     # Header token (the same notion used for domains lookup)
     with open(seq_fa) as fh:
-        first = next((ln for ln in fh if ln.startswith(">")), None)
+        first = next((ln for ln in fh if ln.startswith(">") ), None)
     header_token = first[1:].strip().split()[0] if first else dir_path.name
 
     seq_len = sum(len(line.strip()) for line in seq_fa.open() if not line.startswith(">"))
@@ -469,15 +470,12 @@ def process_dir(dir_path):
     run_cmd([
         "trimal",
         "-automated1",
-        "-keepheader",  # For benchmarking LTR boundry classification, its helpful to have the LTR length in the header. Without "-keepheader", trimal modifies 'Gypsy-1_CiLe_Cimex#LTR/Ty3~LTRlen:490' to 'Gypsy-1_CiLe_Cimex#LTR/Ty3~LTRlen'.
+        "-keepheader",  # keep original headers
         "-in", str(aln_fa),
         "-out", str(dir_path / "LTRs.aln.clean")
     ], verbose)
 
     # ----- Short-circuit if trimmed alignment is too short vs raw alignment -----
-    # MAFFT and trimal dont filter spurious likely false positives.
-    # This is aimed at conservatively cleaning some false positives.
-    # Threshold is configurable via --min-retained-fraction (default 0.6).
     try:
         raw_bp = sum_ungapped_bp(aln_fa)                 # from "LTRs.aln.fa"
         clean_bp = sum_ungapped_bp(dir_path / "LTRs.aln.clean")  # from "LTRs.aln.clean"
@@ -494,7 +492,6 @@ def process_dir(dir_path):
     
     if (clean_bp + extension) <= threshold:
         log_msg(
-        #print(
             f"[SKIP] Trimmed alignment too short for {dir_path.name}: "
             f"clean_bp({clean_bp}) + ext({extension}) <= "
             f"{args.min_retained_fraction:.3f} * raw_bp({raw_bp:.0f})"
@@ -595,10 +592,109 @@ def write_summary(main_out_path: str):
         out.write(f"K2P_d\t{('NA' if K2P_d is None else f'{K2P_d:.6f}')}\n")
 
 
+def prefix_before_dot(path_like: str) -> str:
+    """Return filename stem up to the first '.' (e.g., 'ZMHA_mod.pass.list.fa' -> 'ZMHA_mod')."""
+    name = Path(path_like).name
+    return name.split('.', 1)[0]
+
+
+def domains_prefix(path_like: str) -> str:
+    """Return domains file prefix for matching input FASTA prefixes.
+    We take the part before the first '.' and strip a trailing '_domains' if present.
+    e.g., 'ZMHA_mod_domains.tsv' -> 'ZMHA_mod'
+    """
+    stem = Path(path_like).name.split('.', 1)[0]
+    return re.sub(r'_domains$', '', stem)
+
+
+def process_one_input(args_base: argparse.Namespace, in_fasta: str, per_prefix_domains: dict, multi_mode: bool):
+    """Process a single input FASTA using (possibly) matched domains mapping in multi-input mode."""
+    global ARGS, DOMAINS, LOGFILE
+
+    pref = prefix_before_dot(in_fasta)
+    # Decide temp/out per mode
+    temp_dir = f"{pref}_temp" if multi_mode else args_base.temp_dir
+    outfile = f"{pref}.LTRs.alns.results" if multi_mode else args_base.outfile
+
+    # Prepare workspace (per input)
+    if os.path.exists(temp_dir):
+        shutil.rmtree(temp_dir)
+    os.makedirs(temp_dir, exist_ok=True)
+    open(outfile, "w").close()
+
+    # Pick matching domains mapping (None if absent)
+    DOMAINS = per_prefix_domains.get(pref)
+    if args_base.domains_tsvs and multi_mode and DOMAINS is None:
+        print(f"[DOMAINS] No matching domains TSV for prefix '{pref}'. Proceeding without fast-path.")
+
+    # Create a fresh ARGS namespace for this input
+    ARGS = deepcopy(args_base)
+    ARGS.temp_dir = temp_dir
+    ARGS.outfile = outfile
+    ARGS.input_fasta = in_fasta
+
+    LOGFILE = open(outfile + ".log", "w")
+
+    # Split FASTA into separate seq.fa files (safe/unique dir names; original headers preserved)
+    split_fasta(ARGS.input_fasta, ARGS.temp_dir)
+
+    # Discover sequence directories
+    dirs = [str(p) for p in Path(ARGS.temp_dir).iterdir() if p.is_dir()]
+
+    # Process in parallel with live progress/ETA (single updating line on stderr)
+    total = len(dirs)
+    start = time.monotonic()
+    last_update = 0.0  # throttle screen updates
+    update_interval = 0.25  # seconds between redraws (tweak as desired)
+
+    # We iterate results so we can update the counter as work completes
+    completed = 0
+    print("", file=sys.stderr)  # ensure stderr stream exists
+
+    with Pool(processes=ARGS.threads) as pool:
+        # chunksize=1 gives smoother progress; increase for less overhead
+        for _ in pool.imap_unordered(process_dir, dirs, chunksize=1):
+            completed += 1
+            now = time.monotonic()
+            if (now - last_update) >= update_interval or completed == total:
+                elapsed = now - start
+                pct = (completed / total) * 100 if total else 100.0
+                rate = (completed / elapsed) if elapsed > 0 else 0.0
+                remaining = ((total - completed) / rate) if rate > 0 else float("inf")
+                eta_text = _format_hms(remaining)
+
+                # Carriage return to redraw the same line; no newline
+                msg = (f"\rProcessing {completed}/{total}. "
+                    f"{pct:.2f}% complete. Estimated time remaining {eta_text}")
+                print(msg, end="", file=sys.stderr, flush=True)
+                last_update = now
+
+    # finish the progress line with a newline
+    print("", file=sys.stderr)
+
+    write_summary(ARGS.outfile)
+
+    # Cleanup
+    if ARGS.keep_temp:
+        print(f"Keeping temporary directory {ARGS.temp_dir}")
+    else:
+        print(f"Removing temporary directory {ARGS.temp_dir}")
+        shutil.rmtree(ARGS.temp_dir)
+
+    print(f"All sequences processed for {pref}. Output in {ARGS.outfile}")
+
+    if LOGFILE:
+        LOGFILE.close()
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Process multi-seq LTR-RT FASTA to extract and align LTRs. "
-                    "Optionally fast-path known LTR lengths via a domains TSV."
+        description=(
+            "Process multi-seq LTR-RT FASTA(s) to extract and align LTRs. "
+            "Optionally fast-path known LTR lengths via a domains TSV.\n\n"
+            "Single-input: -t/--temp-dir and -o/--outfile apply as usual.\n"
+            "Multi-input: -t/--temp-dir and -o/--outfile are ignored; per-file temp/out are inferred from the input filename prefix (text before first '.')."
+        )
     )
     parser.add_argument(
         "-k", action="store_true", dest="keep_temp",
@@ -634,23 +730,24 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "-t", default="./temp", dest="temp_dir",
-        help="Temporary directory name (default: ./temp)."
+        help="Temporary directory name (single input only; ignored with multiple inputs)."
     )
     parser.add_argument(
         "-o", default="./LTRs.alns.results", dest="outfile",
-        help="Output filename (default: ./LTRs.alns.results)."
+        help="Output filename (single input only; ignored with multiple inputs)."
     )
     parser.add_argument(
         "-p", type=int, default=20, dest="threads",
-        help="Number of parallel threads (default: 20)."
+        help="Number of parallel threads per input (default: 20)."
     )
     parser.add_argument(
-        "-D", "--domains", dest="domains_tsv", default=None,
-        help="Optional TSV (name\\tLTR_len). If provided, skip LTR discovery and go stright to alignment"
-    )
-    parser.add_argument(
-        "input_fasta",
-        help="Path to multi-sequence LTR-RT FASTA file."
+        "-D", "--domains", dest="domains_tsvs", nargs="*", default=None,
+        help=(
+            "Optional domains TSV file(s) (format: name\\tLTR_len). "
+            "With a single input, provide one TSV. With multiple inputs, you may supply multiple TSVs; "
+            "each TSV is matched to an input by prefix. Matching uses the TSV filename up to the first '.'; "
+            "if it ends with '_domains', that suffix is ignored for matching."
+        )
     )
     parser.add_argument(
         "--min-retained-fraction", type=float, default=0.6, dest="min_retained_fraction",
@@ -658,72 +755,73 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--assume-duplicate-same-ltr", action="store_true", dest="assume_dup_same_ltr",
-        help="Override duplicate-header safety fallback in fast path. Assumes all duplicate header tokens share the same LTR length from the domains TSV. Use with caution."
+        help=(
+            "Override duplicate-header safety fallback in fast path. "
+            "Assumes all duplicate header tokens share the same LTR length from the domains TSV. Use with caution."
+        )
     )
+    parser.add_argument(
+        "--no-plot", action="store_true", dest="no_plot",
+        help="Disable plotting of results into kmer2ltr_density.pdf."
+    )
+    parser.add_argument(
+        "-i", "--input-fastas",
+        nargs="+", required=True,
+        help="Path(s) to multi-sequence LTR-RT FASTA file(s)."
+    )
+#    parser.add_argument(
+#        "input_fastas", nargs="+",
+#        help="Path(s) to multi-sequence LTR-RT FASTA file(s)."
+#    )
 
     args = parser.parse_args()
 
-    # Prepare workspace
-    if os.path.exists(args.temp_dir):
-        shutil.rmtree(args.temp_dir)
-    os.makedirs(args.temp_dir, exist_ok=True)
-    open(args.outfile, "w").close()
+    # Multi-input mode check and warnings for -t/-o
+    multi_mode = len(args.input_fastas) > 1
+    if multi_mode and (args.temp_dir != "./temp" or args.outfile != "./LTRs.alns.results"):
+        print("[WARN] Multiple inputs provided; -t/--temp-dir and -o/--outfile are ignored.", file=sys.stderr)
 
-    # Load domains mapping (if provided)
-    DOMAINS = read_domains(args.domains_tsv)
-    
-    LOGFILE = open(args.outfile + ".log", "w")
+    # Build per-prefix domains mapping
+    per_prefix_domains: dict[str, dict[str, int] | None] = {}
+    if args.domains_tsvs:
+        for dpath in args.domains_tsvs:
+            pref = domains_prefix(dpath)
+            if pref in per_prefix_domains:
+                print(f"[DOMAINS] Warning: duplicate domains TSV for prefix '{pref}'. Overwriting previous mapping.")
+            mapping = read_domains(dpath)
+            if mapping:
+                per_prefix_domains[pref] = mapping
 
-    # Split FASTA into separate seq.fa files (safe/unique dir names; original headers preserved)
-    split_fasta(args.input_fasta, args.temp_dir)
+    # Process inputs in the order provided
+    for in_fa in args.input_fastas:
+        process_one_input(args, in_fa, per_prefix_domains, multi_mode)
 
-    # Set global arguments for process_dir
-    ARGS = args
-
-    # Discover sequence directories
-    dirs = [str(p) for p in Path(args.temp_dir).iterdir() if p.is_dir()]
-
-    # Process in parallel with live progress/ETA (single updating line on stderr)
-    total = len(dirs)
-    start = time.monotonic()
-    last_update = 0.0  # throttle screen updates
-    update_interval = 0.25  # seconds between redraws (tweak as desired)
-
-    # We iterate results so we can update the counter as work completes
-    completed = 0
-    print("", file=sys.stderr)  # ensure stderr stream exists
-
-    with Pool(processes=args.threads) as pool:
-        # chunksize=1 gives smoother progress; increase for less overhead
-        for _ in pool.imap_unordered(process_dir, dirs, chunksize=1):
-            completed += 1
-            now = time.monotonic()
-            if (now - last_update) >= update_interval or completed == total:
-                elapsed = now - start
-                pct = (completed / total) * 100 if total else 100.0
-                rate = (completed / elapsed) if elapsed > 0 else 0.0
-                remaining = ((total - completed) / rate) if rate > 0 else float("inf")
-                eta_text = _format_hms(remaining)
-
-                # Carriage return to redraw the same line; no newline
-                msg = (f"\rProcessing {completed}/{total}. "
-                    f"{pct:.2f}% complete. Estimated time remaining {eta_text}")
-                print(msg, end="", file=sys.stderr, flush=True)
-                last_update = now
-
-    # finish the progress line with a newline
-    print("", file=sys.stderr)
-
-    write_summary(args.outfile)
-
-    # Cleanup
-    if args.keep_temp:
-        print(f"Keeping temporary directory {args.temp_dir}")
+    # === Plotting step (optional) ===
+    # Collect all output results files
+    if multi_mode:
+        result_files = [f"{prefix_before_dot(fa)}.LTRs.alns.results" for fa in args.input_fastas]
     else:
-        print(f"Removing temporary directory {args.temp_dir}")
-        shutil.rmtree(args.temp_dir)
+        result_files = [args.outfile]
 
-    print(f"All sequences processed. Output in {args.outfile}")
-    
-    if LOGFILE:
-        LOGFILE.close()
+    # Filter to existing files (in case some were skipped entirely)
+    result_files = [rf for rf in result_files if os.path.exists(rf)]
+    if not args.no_plot:
+        if not result_files:
+            print("[PLOT] No results found to plot; skipping.", file=sys.stderr)
+        else:
+            plot_cmd = [
+                sys.executable, str(SCRIPT_DIR / "plot_density.py"),
+                "-in", *result_files,
+                "-model", "K2P",
+                "-miu", str(args.mutation_rate),
+                "-out", "kmer2ltr_density.pdf",
+                "--xmax", "0.2",
+                "--label-peaks"
+            ]
+            if args.verbose:
+                print("Running:", " ".join(map(str, plot_cmd)))
+            subprocess.run(plot_cmd, check=True)
+            print("Density plot saved as kmer2ltr_density.pdf")
+    else:
+        print("Skipping plotting step (--no-plot).")
+        
