@@ -445,7 +445,7 @@ def process_dir(dir_path):
 
     # Short-circuit if empty or header-only
     if not has_data_rows(filtered_file):
-        print(f"[SKIP] No k-mer pairs after filtering for {dir_path.name} "
+        log_msg(f"[SKIP] No k-mer pairs after filtering for {dir_path.name} "
               f"({filtered_file} is empty/header-only).")
         try:
             (dir_path / "SKIPPED.no_filtered_pairs").write_text("")
