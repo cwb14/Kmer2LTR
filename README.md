@@ -80,12 +80,12 @@ ls *.domains
 species1.ltr.domains  species2.ltr.domains  species3.ltr.domains
 
 
-head -3 species1.ltr.domains
-<LTR-RT>  <LTR_LEN> 
+head -1 species1.ltr.domains
 CMHA_chr1:90368..96317	172
-CMHA_chr1:562815..547420	3076
-CMHA_chr1:704368..719745	2966
 
+
+# Tells the code that theres an LTR-RT in 'species1.ltr.fa' named 'CMHA_chr1:90368..96317'.
+# Its LTRs are 172bp each in length.
 python Kmer2LTR/Kmer2LTR.py -i species1.ltr.fa species2.ltr.fa species3.ltr.fa -p 50 -D *.domains
 ```
 
