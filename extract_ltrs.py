@@ -93,13 +93,13 @@ def main():
     # Final equal LTR length we can support without overlap and without exceeding proposed lengths
     final_len = min(max_len_no_overlap, prop_len_5p, prop_len_3p)
 
-    # If we had to snip anything down, warn to stderr
-    if final_len < prop_len_5p or final_len < prop_len_3p:
-        print(
-            f"WARNING: LTRs would overlap after extension. "
-            f"Snipping to {final_len} bp each (max allowed: {max_len_no_overlap}).",
-            file=sys.stderr
-        )
+#    # If we had to snip anything down, warn to stderr
+#    if final_len < prop_len_5p or final_len < prop_len_3p:
+#        print(
+#            f"WARNING: LTRs would overlap after extension. "
+#            f"Snipping to {final_len} bp each (max allowed: {max_len_no_overlap}).",
+#            file=sys.stderr
+#        )
 
     # Recompute coordinates symmetrically to guarantee equal length and no overlap
     # 5' LTR: 1..final_len
