@@ -4,37 +4,41 @@
 (2) Force global alignment gapless LTRs.   
 (3) Date with p-dist, JC69, and K2P.  
 
-```
-python Kmer2LTR/Kmer2LTR.py -h
-usage: Kmer2LTR.py [-h] [-k] [-v] [-d DIST] [-l KMIN] [-U KMAX] [-u MUTATION_RATE] [-f STD_FACTOR] [-e EXTENSION] [-t TEMP_DIR] [-o OUTFILE]
-                   [-p THREADS]
-                   input_fasta
-
-Process multi-seq LTR-RT FASTA to extract and align LTRs.
-
-positional arguments:
-  input_fasta       Path to multi-sequence LTR-RT FASTA file.
+```diff
+Process multi-seq LTR-RT FASTA(s) to extract and align LTRs. 
 
 options:
-  -h, --help        show this help message and exit
+  -h, --help            show this help message and exit.
   -k                Keep temp directory after processing.
-  -v                Verbose mode; print each command before executing.
-  -d DIST           Minimum distance between kmer pairs (default: 80).
-  -l KMIN           Minimum kmer length (default: 8).
-  -U KMAX           Maximum kmer length (default: 12).
-  -u MUTATION_RATE  Mutation rate μ (default: 3e-8).
-  -f STD_FACTOR     Standard deviation factor for kmer filtering.
-  -e EXTENSION      Extension length for LTR extraction (default: 65).
-  -t TEMP_DIR       Temporary directory name (default: ./temp).
-  -o OUTFILE        Output filename (default: ./LTRs.alns.results).
-  -p THREADS        Number of parallel threads (default: 20).
-  -D DOMAINS_TSV, --domains DOMAINS_TSV
-                        Optional TSV (name\tLTR_len). If provided, skip LTR discovery and go stright to alignment
+  -v                    Verbose mode; print each command before executing.
+  -d DIST               Minimum distance between kmer pairs (default: 80).
+  -l KMIN               Minimum kmer length (default: 8).
+  -U KMAX               Maximum kmer length (default: 12).
++ -u MUTATION_RATE      Mutation rate μ (default: 3e-8).
+  -f STD_FACTOR         Standard deviation factor for kmer filtering.
+  -e EXTENSION          Extension length for LTR extraction (default: 65).
+  -t TEMP_DIR           Temporary directory name (single input only; ignored with multiple inputs).
++ -o OUTFILE            Output filename (single input only; ignored with multiple inputs).
++ -p THREADS            Number of parallel threads per input (default: 20).
++ -D [DOMAINS_TSVS ...], --domains [DOMAINS_TSVS ...]
+                        Optional domains TSV file(s) (format: name\tLTR_len). With a single input, provide one TSV. With multiple inputs, you may
+                        supply multiple TSVs; each TSV is matched to an input by prefix. Matching uses the TSV filename up to the first '.'; if
+                        it ends with '_domains', that suffix is ignored for matching.
+  --min-retained-fraction MIN_RETAINED_FRACTION
+                        Minimum fraction of ungapped columns retained after trimming required to proceed (default: 0.6).
+  --assume-duplicate-same-ltr
+                        Override duplicate-header safety fallback in fast path. Assumes all duplicate header tokens share the same LTR length
+                        from the domains TSV. Use with caution.
+  --no-plot             Disable plotting of results into kmer2ltr_density.pdf.
++ -i INPUT_FASTAS [INPUT_FASTAS ...], --input-fastas INPUT_FASTAS [INPUT_FASTAS ...]
+                        Path(s) to multi-sequence LTR-RT FASTA file(s).
 ```
 
+Most users probably only need the flags that are highlighted in green.
 
+Single-file input:
 ```
-python Kmer2LTR/Kmer2LTR.py LTR-RT.fa
+python Kmer2LTR/Kmer2LTR.py -i test.fa -u 1.8e-8
 ```
 
 Creates `LTRs.alns.results`.
@@ -54,16 +58,36 @@ Gypsy3#LTR_Ty3  741  744	180	137	43	0.241935	4032258	0.292099	4868310	0.308338	5
 
 `OUTFILE` can be directly used as `DOMAINS_TSV`.
 
+`LTRs.alns.results.summary` shows the cummulative numbers.
+```
+total_length	22408270
+total_transitions	532951
+total_transversions	217017
+raw_d	0.033468
+JC69_d	0.034238
+K2P_d	0.034368
+```
 
 
+Multi-file input with 50 threads:
+```
+python Kmer2LTR/Kmer2LTR.py -i species1.ltr.fa species2.ltr.fa species3.ltr.fa -p 50
+```
+
+We could save time if we already know the lengths of the LTR:
+```
+ls *.domains
+species1.ltr.domains  species2.ltr.domains  species3.ltr.domains
 
 
+head -3 species1.ltr.domains
+<LTR-RT>  <LTR_LEN> 
+CMHA_chr1:90368..96317	172
+CMHA_chr1:562815..547420	3076
+CMHA_chr1:704368..719745	2966
 
-
-
-
-
-
+python Kmer2LTR/Kmer2LTR.py -i species1.ltr.fa species2.ltr.fa species3.ltr.fa -p 50 -D *.domains
+```
 
 
 # Developers note.
@@ -80,3 +104,19 @@ Internal sequence is not mutated.
 Runtime.
 With 100 threads, it processes 20,703 LTR-RTs in 25m:22s.
 With DOMAINS_TSV provided, and 100 threads, it processes those 20,703 LTR-RTs in 3m:28s.
+
+Convert pass list to domains file. 
+```
+for f in *.pass.list; do out="${f%.pass.list}.domains"; python pass_list_domians.py "$f" > "$out"; done
+```
+
+Convert pass list and genome to LTR-RT file:
+```
+for tsv in *.pass.list; do
+    prefix="${tsv%.pass.list}"
+    fasta="${prefix}.fa" 
+    out="${tsv}.fa" 
+    python pass_list_fa_extractor.py -fa "$fasta" -tsv "$tsv" > "$out" &
+done
+wait
+```
