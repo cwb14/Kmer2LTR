@@ -85,7 +85,9 @@ CMHA_chr1:90368..96317	172
 
 
 # Tells the code that theres an LTR-RT in 'species1.ltr.fa' named 'CMHA_chr1:90368..96317'.
-# Its LTRs are 172bp each in length.
+# Its LTRs are each 172bp in length.
+
+# With domain input, we can save time by skipping LTR identification.
 python Kmer2LTR/Kmer2LTR.py -i species1.ltr.fa species2.ltr.fa species3.ltr.fa -p 50 -D *.domains
 ```
 
