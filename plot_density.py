@@ -7,7 +7,7 @@ import sys
 from typing import List, Tuple, Dict
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.lines import Line2D  # <-- added
+from matplotlib.lines import Line2D  # <-- used for legend proxies
 
 # ----------------------------
 # Column map (0-based indices)
@@ -16,6 +16,12 @@ MODEL_COLS = {
     "p":    (6, 7),    # p-dist, p-time
     "JC69": (8, 9),    # JC69-dist, JC69-time
     "K2P":  (10, 11),  # K2P-dist, K2P-time
+}
+
+SUMMARY_KEYS = {
+    "p": "raw_d",
+    "JC69": "JC69_d",
+    "K2P": "K2P_d",
 }
 
 # ----------------------------
@@ -48,6 +54,35 @@ def file_prefix_for_legend(path: str) -> str:
     """Legend name = substring before first '.' in basename."""
     base = os.path.basename(path)
     return base.split('.', 1)[0] if '.' in base else base
+
+def read_summary_value(results_path: str, model: str):
+    """
+    Read the model-specific distance from '<results_path>.summary'.
+    Returns float or None if not found/unreadable.
+    """
+    sum_path = results_path + ".summary"
+    key = SUMMARY_KEYS[model]
+    if not os.path.exists(sum_path):
+        print(f"[warn] Summary file not found for {results_path}: {sum_path}", file=sys.stderr)
+        return None
+    try:
+        with open(sum_path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split("\t")
+                if len(parts) != 2:
+                    continue
+                k, v = parts
+                if k == key:
+                    try:
+                        return float(v)
+                    except ValueError:
+                        return None
+    except Exception as e:
+        print(f"[warn] Failed reading {sum_path}: {e}", file=sys.stderr)
+    return None
 
 # ----------------------------
 # KDE (no external deps)
@@ -131,7 +166,9 @@ def plot_density(
     miu_str: str,
     out_pdf: str,
     xmax_override: float = None,
-    label_peaks: int = 0,  # 0 = off, >0 = number of peaks to mark with vlines & legend entries
+    label_peaks: int = 0,          # 0 = off, >0 = number of peaks to mark
+    label_summary: bool = False,   # mark vline at model-specific summary value
+    no_legend: bool = False,       # suppress legend entirely
 ):
     dist_idx, time_idx = MODEL_COLS[model]
 
@@ -175,19 +212,24 @@ def plot_density(
     xgrid = np.linspace(xmin_plot, xmax_plot, 800)
 
     # Compute densities and draw curves
-    densities = []
-    labels = []
-    line_colors = []
     plt.figure(figsize=(8.8, 5.8))
     ax = plt.gca()
+
+    # Track series metadata for legend assembly
+    per_series = {}  # path -> dict(color, label, peak_xs (list), summary (float|None), sort_key)
 
     for path, (d, _t) in series.items():
         bw = silverman_bandwidth(d)
         dens = kde_gaussian(d, xgrid, bw)
         line, = ax.plot(xgrid, dens, linewidth=2, label=file_prefix_for_legend(path))
-        densities.append(dens)
-        labels.append(file_prefix_for_legend(path))
-        line_colors.append(line.get_color())  # capture cycle color
+        per_series[path] = {
+            "color": line.get_color(),
+            "label": file_prefix_for_legend(path),
+            "peak_xs": [],
+            "summary": None,
+            "sort_key": None,
+            "dens": dens  # keep to find peaks
+        }
 
     ax.set_xlim(xmin_plot, xmax_plot)
     ax.set_ylabel("Density")
@@ -201,40 +243,76 @@ def plot_density(
     # Title with μ
     plt.title(f"Density of {model} divergence (μ = {miu_str})")
 
+    # Summary-based vlines per series
+    if label_summary:
+        for path in per_series.keys():
+            v = read_summary_value(path, model)
+            if v is None:
+                continue
+            ax.axvline(x=v, linestyle="--", linewidth=1.5, color=per_series[path]["color"], alpha=0.85)
+            per_series[path]["summary"] = v
+
+    # Peak-based vlines and capture peak positions
     if label_peaks and label_peaks > 0:
-        # Draw vertical dashed lines at peaks, and build legend entries as "<label> - x1, x2, ..."
-        legend_items = []  # (primary_peak_x, label_string, color)
-        for dens, label, color in zip(densities, labels, line_colors):
+        for path, meta in per_series.items():
+            dens = meta["dens"]
             peaks = find_top_peaks(xgrid, dens, k=label_peaks)
             if not peaks:
-                # nothing to draw / add
                 continue
-
-            # Sort peaks by x (distance) ascending just for a cleaner legend per series
+            # sort peaks by x for prettier legend text
             peaks_sorted_by_x = sorted(peaks, key=lambda p: p[0])
+            xs = [xp for (xp, _yp, _idx) in peaks_sorted_by_x]
+            for xp in xs:
+                ax.axvline(x=xp, linestyle="--", linewidth=1, color=meta["color"], alpha=0.8)
+            meta["peak_xs"] = xs
+            # sort key = tallest peak's x (find_top_peaks returns peaks sorted by height desc)
+            meta["sort_key"] = peaks[0][0]
 
-            # Draw vlines for each peak using the same color as the density
-            for (xp, _yp, _idx) in peaks_sorted_by_x:
-                ax.axvline(x=xp, linestyle="--", linewidth=1, color=color, alpha=0.8)
+    # ----------------------------
+    # Legend construction
+    # ----------------------------
+    if not no_legend:
+        any_values = any((meta["peak_xs"] or (meta["summary"] is not None)) for meta in per_series.values())
+        if any_values:
+            # If any peaks exist, sort by tallest-peak x; else if only summaries, sort by summary.
+            if any(meta["peak_xs"] for meta in per_series.values()):
+                sort_items = sorted(per_series.values(), key=lambda m: (float('inf') if m["sort_key"] is None else m["sort_key"]))
+            else:
+                sort_items = sorted(per_series.values(), key=lambda m: (float('inf') if m["summary"] is None else m["summary"]))
+            handles = []
+            texts = []
+            for meta in sort_items:
+                color = meta["color"]
+                label = meta["label"]
+                peaks_text = ""
+                summary_text = ""
+                if meta["peak_xs"]:
+                    peaks_text = ", ".join(f"{x:.4f}" for x in meta["peak_xs"])
+                if meta["summary"] is not None:
+                    summary_text = f"{meta['summary']:.4f}"
 
-            # Build legend text: "LABEL - 0.0197, 0.0421"
-            peak_strs = [f"{xp:.4f}" for (xp, _yp, _idx) in peaks_sorted_by_x]
-            legend_text = f"{label} - {', '.join(peak_strs)}"
+                # Compose legend line based on available parts:
+                if meta["peak_xs"] and (meta["summary"] is not None):
+                    # both present
+                    text = f"{label} - {peaks_text}; summary: {summary_text}"
+                elif meta["peak_xs"]:
+                    text = f"{label} - {peaks_text}"
+                elif meta["summary"] is not None:
+                    text = f"{label} - {summary_text}"
+                else:
+                    text = label  # fallback (shouldn't happen if any_values is True)
 
-            # Use the tallest peak's x as the sorting key across series
-            tallest_peak_x = peaks[0][0]  # find_top_peaks returns peaks sorted by height desc
-            legend_items.append((tallest_peak_x, legend_text, color))
+                handles.append(Line2D([0], [0], color=color, lw=2))
+                texts.append(text)
 
-        # Sort legend by ascending peak value
-        legend_items.sort(key=lambda tup: tup[0])  # ascending by primary peak x
+            ax.legend(handles=handles, labels=texts, loc="upper right", frameon=True)
+        else:
+            # Default legend = series names
+            ax.legend(loc="upper right", frameon=True)
 
-        # Build proxy handles so legend color matches the series color
-        handles = [Line2D([0], [0], color=col, lw=2) for (_x, _txt, col) in legend_items]
-        texts = [txt for (_x, txt, _col) in legend_items]
-        ax.legend(handles=handles, labels=texts, loc="upper right", frameon=True)
-    else:
-        # Original legend when --label-peaks is off
-        ax.legend(loc="upper right", frameon=True)
+    # Cleanup: drop stored densities to avoid accidental reuse
+    for meta in per_series.values():
+        meta.pop("dens", None)
 
     plt.tight_layout()
     plt.savefig(out_pdf, format="pdf")
@@ -270,9 +348,18 @@ def main():
     )
     parser.add_argument(
         "--label-peaks", nargs="?", const="1", default="0",
-        help="Mark top N peaks per curve with vertical dashed lines, and put peak values in the legend "
-             "(sorted ascending by the tallest peak). Default N=1 when flag present. "
-             "If omitted, no peak markers."
+        help=("Mark top N peaks per curve with vertical dashed lines, and put peak values in the legend "
+              "(sorted ascending by the tallest peak). Default N=1 when flag present. "
+              "If omitted, no peak markers.")
+    )
+    parser.add_argument(
+        "--label-summary", action="store_true",
+        help=("Draw a vertical dashed line per input at the model-specific value read from "
+              "'<input>.summary' (keys: raw_d, JC69_d, K2P_d), and include that value in the legend.")
+    )
+    parser.add_argument(
+        "--no-legend", action="store_true",
+        help="Suppress the legend entirely (vlines will still be shown if requested)."
     )
 
     args = parser.parse_args()
@@ -292,7 +379,9 @@ def main():
             miu_str=args.miu,
             out_pdf=out_pdf,
             xmax_override=args.xmax,
-            label_peaks=label_peaks
+            label_peaks=label_peaks,
+            label_summary=args.label_summary,
+            no_legend=args.no_legend,
         )
     except Exception as e:
         print(f"[error] {e}", file=sys.stderr)
