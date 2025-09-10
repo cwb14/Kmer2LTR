@@ -206,6 +206,7 @@ def plot_density(
     if xmin == xmax:
         xmax = xmin + 1e-9
     xpad = 0.02 * (xmax - xmin) if xmax > xmin else 0.01
+    xmin_plot = max(0.0, xmin - xpad)
     xmin_plot = xmin - xpad
     xmax_plot = xmax + xpad
 
