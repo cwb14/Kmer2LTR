@@ -12,15 +12,24 @@ import shlex
 import sys
 import time
 from copy import deepcopy
+import platform
 
 q = shlex.quote
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
 
+# Select correct WFA binary depending on OS
+if platform.system() == "Darwin":  # macOS
+    WFA_BIN = SCRIPT_DIR / "wfa_mac"
+else:  # default to Linux
+    WFA_BIN = SCRIPT_DIR / "wfa"
+
+
 # Global args/domains placeholders
 ARGS = None
 DOMAINS = None  # dict[str,int] or None
 LOGFILE = None
+LOG_PATH = None  # <- add this
 
 def sanitize_name(name: str) -> str:
     """
@@ -73,6 +82,14 @@ def _format_hms(seconds: float) -> str:
     h, s = divmod(s, 3600)
     m, s = divmod(s, 60)
     return f"{h}h:{m}m:{s}s"
+    
+def _pool_init(args_ns, domains_map, log_path):
+    """Initializer for multiprocessing workers (macOS spawn-safe)."""
+    global ARGS, DOMAINS, LOGFILE, LOG_PATH
+    ARGS = args_ns
+    DOMAINS = domains_map
+    LOG_PATH = log_path
+    LOGFILE = None  # don't share a handle across processes
 
 def has_data_rows(path: Path) -> bool:
     """
@@ -94,10 +111,18 @@ def has_data_rows(path: Path) -> bool:
 
 def log_msg(msg: str):
     """Write warnings/skips/etc. to the logfile instead of cluttering stderr."""
-    global LOGFILE
-    if LOGFILE:
+    global LOGFILE, LOG_PATH
+    # Prefer path-based logging to avoid sharing file handles across processes.
+    if LOG_PATH:
+        try:
+            with open(LOG_PATH, "a") as lf:
+                lf.write(msg.strip() + "\n")
+        except Exception:
+            pass
+    elif LOGFILE:
         LOGFILE.write(msg.strip() + "\n")
         LOGFILE.flush()
+
 
 def run_cmd(cmd, verbose):
     """
@@ -356,7 +381,7 @@ def try_fast_path(dir_path: Path, header_token: str, seq_len: int) -> bool:
 
     # Final WFA and append results (same filtering as heavy path)
     cmd_str = (
-        f"{q(str(SCRIPT_DIR / 'wfa'))} -E 10000 -e 10000 -o 10000 -O 10000 -u {ARGS.mutation_rate} "
+        f"{q(str(WFA_BIN))} -E 10000 -e 10000 -o 10000 -O 10000 -u {ARGS.mutation_rate} "
         f"{q(str(dir_path / 'LTRs.aln.clean'))}"
         " | cut -f1,5- | sed -e 's/-0\\.000000/0.000000/g' | "
         "awk -F'\t' '{if($1~/_(5prime|3prime)/) sub(/_(5prime|3prime).*$/, \"\", $1); print}' OFS='\t' | "
@@ -517,7 +542,7 @@ def process_dir(dir_path):
 
     # Final WFA and append results
     cmd_str = (
-        f"{q(str(SCRIPT_DIR / 'wfa'))} -E 10000 -e 10000 -o 10000 -O 10000 -u {args.mutation_rate} "
+        f"{q(str(WFA_BIN))} -E 10000 -e 10000 -o 10000 -O 10000 -u {args.mutation_rate} "
         f"{q(str(dir_path / 'LTRs.aln.clean'))}"
         " | cut -f1,5- | sed -e 's/-0\\.000000/0.000000/g' | "
         "awk -F'\t' '{if($1~/_(5prime|3prime)/) sub(/_(5prime|3prime).*$/, \"\", $1); print}' OFS='\t' | "
@@ -633,7 +658,10 @@ def process_one_input(args_base: argparse.Namespace, in_fasta: str, per_prefix_d
     ARGS.outfile = outfile
     ARGS.input_fasta = in_fasta
 
-    LOGFILE = open(outfile + ".log", "w")
+    log_path = outfile + ".log"
+    # create/clear the log file once in the parent
+    with open(log_path, "w") as _lf:
+        _lf.write("")  # truncate
 
     # Split FASTA into separate seq.fa files (safe/unique dir names; original headers preserved)
     split_fasta(ARGS.input_fasta, ARGS.temp_dir)
@@ -651,8 +679,11 @@ def process_one_input(args_base: argparse.Namespace, in_fasta: str, per_prefix_d
     completed = 0
     print("", file=sys.stderr)  # ensure stderr stream exists
 
-    with Pool(processes=ARGS.threads) as pool:
-        # chunksize=1 gives smoother progress; increase for less overhead
+    with Pool(
+        processes=ARGS.threads,
+        initializer=_pool_init,
+        initargs=(ARGS, DOMAINS, log_path),
+    ) as pool:
         for _ in pool.imap_unordered(process_dir, dirs, chunksize=1):
             completed += 1
             now = time.monotonic()
@@ -683,8 +714,8 @@ def process_one_input(args_base: argparse.Namespace, in_fasta: str, per_prefix_d
 
     print(f"All sequences processed for {pref}. Output in {ARGS.outfile}")
 
-    if LOGFILE:
-        LOGFILE.close()
+#    if LOGFILE:
+#        LOGFILE.close()
 
 
 if __name__ == "__main__":
@@ -824,4 +855,5 @@ if __name__ == "__main__":
             print("Density plot saved as kmer2ltr_density.pdf")
     else:
         print("Skipping plotting step (--no-plot).")
-        
+
+
