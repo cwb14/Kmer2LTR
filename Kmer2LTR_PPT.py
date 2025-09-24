@@ -18,7 +18,8 @@ q = shlex.quote
 
 # Adds "--ppt-range 50" parametere to search for PPT sequence near the 3' LTR.
 # In the RepBase LTR-RT lib, '--ppt-range 50' classifies PPTs in 77% of LTR-RTs. 
-# Lowering to 85% purine seems not to improve it.
+# In the MTEC LTR-lib, it's 61%.
+# Lowering to 85% purine cutoff seems not to improve it.
 # So, presence of PPT is a good way to lose quite a few true positives if we were to filter on it.
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
