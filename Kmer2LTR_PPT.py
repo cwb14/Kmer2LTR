@@ -12,16 +12,27 @@ import shlex
 import sys
 import time
 from copy import deepcopy
+import platform
 
 q = shlex.quote
 
+# Adds "--ppt-range 50" parametere to search for PPT sequence near the 3' LTR.
+
 SCRIPT_DIR = Path(__file__).parent.resolve()
+
+# Select correct WFA binary depending on OS
+if platform.system() == "Darwin":  # macOS
+    WFA_BIN = SCRIPT_DIR / "wfa_mac"
+else:  # default to Linux
+    WFA_BIN = SCRIPT_DIR / "wfa"
+
 
 # Global args/domains placeholders
 ARGS = None
 DOMAINS = None  # dict[str,int] or None
 LOGFILE = None
 LOG_PATH = None  # <- add this
+PURINES = set("AGag")
 
 def sanitize_name(name: str) -> str:
     """
@@ -268,6 +279,54 @@ def parse_proposed_ltr_len_from_aln(aln_fa: Path) -> int | None:
         return None
     return None
 
+def _find_ppt_in_window(window: str, min_len: int = 8, min_purine_frac: float = 0.9) -> str | None:
+    """
+    Find the longest substring in `window` whose purine (A/G) fraction >= `min_purine_frac`
+    and length >= `min_len`. If multiple have the same length, prefer the one closest
+    to the 3' LTR (i.e., with the highest start index).
+    Returns the substring, or None if none found.
+    """
+    n = len(window)
+    if n < min_len:
+        return None
+    # prefix sums of non-purines (to compute purine fraction fast)
+    npref = [0] * (n + 1)  # npref[i] = count of non-purines in window[:i]
+    for i, ch in enumerate(window, 1):
+        npref[i] = npref[i-1] + (0 if ch in PURINES else 1)
+    best = (0, -1, -1)  # (length, start, end)
+    for start in range(0, n - min_len + 1):
+        # Scan ends; prefer longer and then later-starting segments
+        for end in range(start + min_len, n + 1):
+            length = end - start
+            non_pur = npref[end] - npref[start]
+            # allowed non-purines is floor(0.1 * length)
+            if non_pur * 10 <= length:  # avoids float ops
+                if length > best[0] or (length == best[0] and start > best[1]):
+                    best = (length, start, end)
+    if best[0] >= min_len:
+        _, s, e = best
+        return window[s:e]
+    return None
+
+def find_ppt_from_seq(seq: str, ltr_len_3p: int, ppt_range: int) -> str:
+    """
+    Given the full element sequence (plus strand), the 3' LTR length, and ppt_range,
+    return the PPT string or 'NA'.
+    Searches the region [len(seq)-ltr_len_3p - ppt_range, len(seq)-ltr_len_3p).
+    """
+    if ppt_range <= 0 or ltr_len_3p <= 0:
+        return "NA"
+    seqlen = len(seq)
+    if ltr_len_3p > seqlen:
+        return "NA"
+    win_end = seqlen - ltr_len_3p
+    win_start = max(0, win_end - ppt_range)
+    if win_start >= win_end:
+        return "NA"
+    window = seq[win_start:win_end]
+    ppt = _find_ppt_in_window(window, min_len=8, min_purine_frac=0.9)
+    return ppt if ppt else "NA"
+
 
 def try_fast_path(dir_path: Path, header_token: str, seq_len: int) -> bool:
     """
@@ -369,11 +428,20 @@ def try_fast_path(dir_path: Path, header_token: str, seq_len: int) -> bool:
         return True  # fast-path executed, but result skipped
 
     # Fast-path: use DOMAINS_TSV value directly, do NOT subtract extension
-    reported_len = ltr_len
+    reported_len = ltr_len  # used as column 2 and for PPT lookup
 
-    # Final WFA and append results (same filtering as heavy path)
+    # Compute PPT (if enabled)
+    ppt_seq = "NA"
+    try:
+        if ARGS.ppt_range and reported_len > 0:
+            full_seq = read_seq_string(dir_path / "seq.fa")
+            ppt_seq = find_ppt_from_seq(full_seq, reported_len, ARGS.ppt_range)
+    except Exception as _e:
+        ppt_seq = "NA"
+
+    # Final WFA; we will append the PPT column per line
     cmd_str = (
-        f"{q(str(SCRIPT_DIR / 'wfa'))} -E 10000 -e 10000 -o 10000 -O 10000 -u {ARGS.mutation_rate} "
+        f"{q(str(WFA_BIN))} -E 10000 -e 10000 -o 10000 -O 10000 -u {ARGS.mutation_rate} "
         f"{q(str(dir_path / 'LTRs.aln.clean'))}"
         " | cut -f1,5- | sed -e 's/-0\\.000000/0.000000/g' | "
         "awk -F'\t' '{if($1~/_(5prime|3prime)/) sub(/_(5prime|3prime).*$/, \"\", $1); print}' OFS='\t' | "
@@ -383,11 +451,14 @@ def try_fast_path(dir_path: Path, header_token: str, seq_len: int) -> bool:
 
     if ARGS.verbose:
         print("Running:", cmd_str)
+    # Capture WFA output and append PPT column
+    res = subprocess.run(cmd_str, shell=True, check=True, capture_output=True, text=True)
+    lines = [ln for ln in res.stdout.splitlines() if ln.strip()]
     with open(ARGS.outfile, "a") as ofile:
-        subprocess.run(cmd_str, shell=True, check=True, stdout=ofile)
+        for ln in lines:
+            ofile.write(ln + "\t" + ppt_seq + "\n")
 
     return True
-
 
 def process_dir(dir_path):
     """
@@ -532,9 +603,9 @@ def process_dir(dir_path):
         proposed_adj = max(proposed_len - ARGS.extension, 0)
 
 
-    # Final WFA and append results
+    # Final WFA; we will append the PPT column per line
     cmd_str = (
-        f"{q(str(SCRIPT_DIR / 'wfa'))} -E 10000 -e 10000 -o 10000 -O 10000 -u {args.mutation_rate} "
+        f"{q(str(WFA_BIN))} -E 10000 -e 10000 -o 10000 -O 10000 -u {args.mutation_rate} "
         f"{q(str(dir_path / 'LTRs.aln.clean'))}"
         " | cut -f1,5- | sed -e 's/-0\\.000000/0.000000/g' | "
         "awk -F'\t' '{if($1~/_(5prime|3prime)/) sub(/_(5prime|3prime).*$/, \"\", $1); print}' OFS='\t' | "
@@ -543,8 +614,22 @@ def process_dir(dir_path):
     )
     if verbose:
         print("Running:", cmd_str)
+
+    # Compute PPT (if enabled)
+    ppt_seq = "NA"
+    try:
+        if ARGS.ppt_range and proposed_adj > 0:
+            full_seq = read_seq_string(dir_path / "seq.fa")
+            ppt_seq = find_ppt_from_seq(full_seq, proposed_adj, ARGS.ppt_range)
+    except Exception as _e:
+        ppt_seq = "NA"
+
+    # Capture WFA output and append PPT column
+    res = subprocess.run(cmd_str, shell=True, check=True, capture_output=True, text=True)
+    lines = [ln for ln in res.stdout.splitlines() if ln.strip()]
     with open(out_file, "a") as ofile:
-        subprocess.run(cmd_str, shell=True, check=True, stdout=ofile)
+        for ln in lines:
+            ofile.write(ln + "\t" + ppt_seq + "\n")
 
 def write_summary(main_out_path: str):
     """
@@ -796,6 +881,11 @@ if __name__ == "__main__":
 #        "input_fastas", nargs="+",
 #        help="Path(s) to multi-sequence LTR-RT FASTA file(s)."
 #    )
+    parser.add_argument(
+        "--ppt-range", type=int, default=0, dest="ppt_range",
+        help="Scan this many bp upstream of the 3' LTR for a polypurine tract (length>=8, >=90%% A/G). 0 disables (default: 0)."
+    )
+
 
     args = parser.parse_args()
 
