@@ -24,6 +24,8 @@ options:
                         Optional domains TSV file(s) (format: name\tLTR_len). With a single input, provide one TSV. With multiple inputs, you may
                         supply multiple TSVs; each TSV is matched to an input by prefix. Matching uses the TSV filename up to the first '.'; if
                         it ends with '_domains', that suffix is ignored for matching.
+  --max-win-overdisp MAX_WIN_OVERDISP
+                        If set, exclude alignments with window overdispersion (win_overdisp) greater than this value.
   --min-retained-fraction MIN_RETAINED_FRACTION
                         Minimum fraction of ungapped columns retained after trimming required to proceed (default: 0.6).
   --assume-duplicate-same-ltr
@@ -91,6 +93,9 @@ CMHA_chr1:90368..96317	172
 python Kmer2LTR/Kmer2LTR.py -i species1.ltr.fa species2.ltr.fa species3.ltr.fa -p 50 -D *.domains
 ```
 
+- `--max-win-overdisp` and `--min-retained-fraction` are filtration flags to remove candidate LTR-RTs if they appear dubious.    
+  - `--max-win-overdisp` is used to exclude LTR-RTs if their LTRs are inconsistent diveregence. Eg, the 5' half of the LTRs have low divergence, but the 3' half appears quite divergence. This can happen if the LTR boundaries are not accurate. Start with `--max-win-overdisp 6` and lower for additional stringency.  
+  - `--min-retained-fraction` is used to exclude LTR-RTs if the mafft/trimal-cleaned LTRs are shorter than threshold of the kmer-defined LTR boundary. Start with `--min-retained-fraction 0.5` or `--min-retained-fraction 0.6`.  
 
 # Developers note.
 TESS-PrinTE makes `lib_clean.fa` with LTR length in the header. All LTRs are unmutated. 
