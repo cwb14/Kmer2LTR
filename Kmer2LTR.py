@@ -381,12 +381,16 @@ def try_fast_path(dir_path: Path, header_token: str, seq_len: int) -> bool:
 
     # Final WFA and append results (same filtering as heavy path)
     cmd_str = (
-        f"{q(str(WFA_BIN))} -E 10000 -e 10000 -o 10000 -O 10000 -u {ARGS.mutation_rate} "
+        f"{q(str(WFA_BIN))} -E 10000 -e 10000 -o 10000 -O 10000 -u {ARGS.mutation_rate} -W 50 "
         f"{q(str(dir_path / 'LTRs.aln.clean'))}"
         " | cut -f1,5- | sed -e 's/-0\\.000000/0.000000/g' | "
         "awk -F'\t' '{if($1~/_(5prime|3prime)/) sub(/_(5prime|3prime).*$/, \"\", $1); print}' OFS='\t' | "
         "awk '$6 <= 0.35' | "
-        f"awk -v P={reported_len} 'BEGIN{{OFS=\"\\t\"}} {{for(i=NF;i>=2;i--) $(i+1)=$(i); $2=P; print}}' "
+        # Optional filter on last column (win_overdisp) if requested
+        + (f" awk -v M={ARGS.max_win_overdisp} '($NF+0) <= M' " if ARGS.max_win_overdisp is not None else "")
+        # Always drop the three window cols (win_n, win_mean, win_overdisp)
+        + "| awk 'BEGIN{OFS=\"\\t\"} {if(NF>3) NF=NF-3; print}' "
+        + f"| awk -v P={reported_len} 'BEGIN{{OFS=\"\\t\"}} {{for(i=NF;i>=2;i--) $(i+1)=$(i); $2=P; print}}' "
     )
 
     if ARGS.verbose:
@@ -542,12 +546,16 @@ def process_dir(dir_path):
 
     # Final WFA and append results
     cmd_str = (
-        f"{q(str(WFA_BIN))} -E 10000 -e 10000 -o 10000 -O 10000 -u {args.mutation_rate} "
+        f"{q(str(WFA_BIN))} -E 10000 -e 10000 -o 10000 -O 10000 -u {args.mutation_rate} -W 50 "
         f"{q(str(dir_path / 'LTRs.aln.clean'))}"
         " | cut -f1,5- | sed -e 's/-0\\.000000/0.000000/g' | "
         "awk -F'\t' '{if($1~/_(5prime|3prime)/) sub(/_(5prime|3prime).*$/, \"\", $1); print}' OFS='\t' | "
         "awk '$6 <= 0.35' | "
-        f"awk -v P={proposed_adj} 'BEGIN{{OFS=\"\\t\"}} {{for(i=NF;i>=2;i--) $(i+1)=$(i); $2=P; print}}' "
+        # Optional filter on last column (win_overdisp) if requested
+        + (f" awk -v M={args.max_win_overdisp} '($NF+0) <= M' " if args.max_win_overdisp is not None else "")
+        # Always drop the three window cols (win_n, win_mean, win_overdisp)
+        + "| awk 'BEGIN{OFS=\"\\t\"} {if(NF>3) NF=NF-3; print}' "
+        + f"| awk -v P={proposed_adj} 'BEGIN{{OFS=\"\\t\"}} {{for(i=NF;i>=2;i--) $(i+1)=$(i); $2=P; print}}' "
     )
     if verbose:
         print("Running:", cmd_str)
@@ -781,6 +789,11 @@ if __name__ == "__main__":
         )
     )
     parser.add_argument(
+        "--max-win-overdisp", type=float, default=None, dest="max_win_overdisp",
+        help="If set, exclude alignments with window overdispersion (win_overdisp) greater than this value."
+    )
+
+    parser.add_argument(
         "--min-retained-fraction", type=float, default=0.6, dest="min_retained_fraction",
         help="Minimum fraction of ungapped columns retained after trimming required to proceed (default: 0.6)."
     )
@@ -855,5 +868,4 @@ if __name__ == "__main__":
             print("Density plot saved as kmer2ltr_density.pdf")
     else:
         print("Skipping plotting step (--no-plot).")
-
 
