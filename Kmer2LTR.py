@@ -385,9 +385,9 @@ def try_fast_path(dir_path: Path, header_token: str, seq_len: int) -> bool:
         f"{q(str(dir_path / 'LTRs.aln.clean'))}"
         " | cut -f1,5- | sed -e 's/-0\\.000000/0.000000/g' | "
         "awk -F'\t' '{if($1~/_(5prime|3prime)/) sub(/_(5prime|3prime).*$/, \"\", $1); print}' OFS='\t' | "
-        "awk '$6 <= 0.35' | "
+        "awk '$6 <= 0.35' "
         # Optional filter on last column (win_overdisp) if requested
-        + (f" awk -v M={ARGS.max_win_overdisp} '($NF+0) <= M' " if ARGS.max_win_overdisp is not None else "")
+        + (f" | awk -v M={ARGS.max_win_overdisp} '($NF+0) <= M' " if ARGS.max_win_overdisp is not None else "")
         # Always drop the three window cols (win_n, win_mean, win_overdisp)
         + "| awk 'BEGIN{OFS=\"\\t\"} {if(NF>3) NF=NF-3; print}' "
         + f"| awk -v P={reported_len} 'BEGIN{{OFS=\"\\t\"}} {{for(i=NF;i>=2;i--) $(i+1)=$(i); $2=P; print}}' "
@@ -550,9 +550,9 @@ def process_dir(dir_path):
         f"{q(str(dir_path / 'LTRs.aln.clean'))}"
         " | cut -f1,5- | sed -e 's/-0\\.000000/0.000000/g' | "
         "awk -F'\t' '{if($1~/_(5prime|3prime)/) sub(/_(5prime|3prime).*$/, \"\", $1); print}' OFS='\t' | "
-        "awk '$6 <= 0.35' | "
+        "awk '$6 <= 0.35' "
         # Optional filter on last column (win_overdisp) if requested
-        + (f" awk -v M={args.max_win_overdisp} '($NF+0) <= M' " if args.max_win_overdisp is not None else "")
+        + (f" | awk -v M={args.max_win_overdisp} '($NF+0) <= M' " if args.max_win_overdisp is not None else "")
         # Always drop the three window cols (win_n, win_mean, win_overdisp)
         + "| awk 'BEGIN{OFS=\"\\t\"} {if(NF>3) NF=NF-3; print}' "
         + f"| awk -v P={proposed_adj} 'BEGIN{{OFS=\"\\t\"}} {{for(i=NF;i>=2;i--) $(i+1)=$(i); $2=P; print}}' "
