@@ -15,7 +15,7 @@ from copy import deepcopy
 import platform
 
 q = shlex.quote
-
+MIN_SEQ_BP = 80
 SCRIPT_DIR = Path(__file__).parent.resolve()
 
 # Select correct WFA binary depending on OS
@@ -257,6 +257,24 @@ def read_seq_string(seq_fa: Path) -> str:
     return "".join(seq_chunks)
 
 
+def read_existing_ids(results_path: str) -> set[str]:
+    """
+    Return the set of first-column IDs already present in an existing results file.
+    Lines may be blank; tolerate non-numeric fields elsewhere.
+    """
+    ids = set()
+    try:
+        with open(results_path) as fh:
+            for line in fh:
+                s = line.strip()
+                if not s:
+                    continue
+                # first token is the LTR-RT name after awk header cleanup in the pipeline
+                ids.add(s.split()[0])
+    except FileNotFoundError:
+        pass
+    return ids
+
 def parse_proposed_ltr_len_from_aln(aln_fa: Path) -> int | None:
     """
     Look for a 5' header line like:
@@ -427,6 +445,14 @@ def process_dir(dir_path):
     header_token = first[1:].strip().split()[0] if first else dir_path.name
 
     seq_len = sum(len(line.strip()) for line in seq_fa.open() if not line.startswith(">"))
+
+    if seq_len < MIN_SEQ_BP:
+        log_msg(f"[SKIP] {dir_path.name} length {seq_len} < {MIN_SEQ_BP} bp; skipping as likely erroneous.")
+        try:
+            (dir_path / "SKIPPED.too_short").write_text(f"seq_len={seq_len}\nmin={MIN_SEQ_BP}\n")
+        except Exception:
+            pass
+        return
 
     # ===== FAST-PATH TRY =====
     try:
@@ -653,7 +679,12 @@ def process_one_input(args_base: argparse.Namespace, in_fasta: str, per_prefix_d
     if os.path.exists(temp_dir):
         shutil.rmtree(temp_dir)
     os.makedirs(temp_dir, exist_ok=True)
-    open(outfile, "w").close()
+
+    if args_base.reuse_existing and os.path.exists(outfile):
+        # do not truncate; we will append only missing items
+        pass
+    else:
+        open(outfile, "w").close()
 
     # Pick matching domains mapping (None if absent)
     DOMAINS = per_prefix_domains.get(pref)
@@ -674,8 +705,43 @@ def process_one_input(args_base: argparse.Namespace, in_fasta: str, per_prefix_d
     # Split FASTA into separate seq.fa files (safe/unique dir names; original headers preserved)
     split_fasta(ARGS.input_fasta, ARGS.temp_dir)
 
+    # Map sanitized dir -> original header token (from header_map.tsv)
+    header_map = {}
+    try:
+        with open(Path(ARGS.temp_dir) / "header_map.tsv") as hm:
+            for line in hm:
+                s = line.strip()
+                if not s:
+                    continue
+                safe, token = s.split("\t", 1)
+                header_map[safe] = token
+    except FileNotFoundError:
+        header_map = {}
+
     # Discover sequence directories
-    dirs = [str(p) for p in Path(ARGS.temp_dir).iterdir() if p.is_dir()]
+    dirs = [p for p in Path(ARGS.temp_dir).iterdir() if p.is_dir()]
+
+    # --- NEW: filter to only missing IDs if reusing ---
+    if args_base.reuse_existing:
+        already = read_existing_ids(outfile)
+        # keep only dirs whose original header token is not yet in results
+        def needs_run(p: Path) -> bool:
+            token = header_map.get(p.name)
+            if token is None:
+                # Fallback: read the header token directly from seq.fa
+                try:
+                    with open(p / "seq.fa") as fh:
+                        first = next((ln for ln in fh if ln.startswith(">")), None)
+                    token = first[1:].strip().split()[0] if first else p.name
+                except Exception:
+                    token = p.name
+            return token not in already
+
+        dirs = [str(p) for p in dirs if needs_run(p)]
+        if args_base.verbose:
+            print(f"[REUSE] {len(already)} already in {outfile}; {len(dirs)} remaining to process.")
+    else:
+        dirs = [str(p) for p in dirs]
 
     # Process in parallel with live progress/ETA (single updating line on stderr)
     total = len(dirs)
@@ -779,6 +845,11 @@ if __name__ == "__main__":
         "-p", type=int, default=20, dest="threads",
         help="Number of parallel threads per input (default: 20)."
     )
+    # in argparse section
+    parser.add_argument(
+        "--reuse-existing", action="store_true", dest="reuse_existing",
+        help="If the per-input results file already exists, only process LTR-RTs missing from it and append."
+    )
     parser.add_argument(
         "-D", "--domains", dest="domains_tsvs", nargs="*", default=None,
         help=(
@@ -868,4 +939,3 @@ if __name__ == "__main__":
             print("Density plot saved as kmer2ltr_density.pdf")
     else:
         print("Skipping plotting step (--no-plot).")
-
