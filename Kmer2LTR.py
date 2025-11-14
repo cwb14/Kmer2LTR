@@ -931,6 +931,7 @@ if __name__ == "__main__":
                 "-miu", str(args.mutation_rate),
                 "-out", "kmer2ltr_density.pdf",
                 "--xmax", "0.2",
+                "--bins", "0",
                 "--label-peaks"
             ]
             if args.verbose:
