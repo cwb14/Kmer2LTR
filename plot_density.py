@@ -169,8 +169,12 @@ def plot_density(
     label_peaks: int = 0,          # 0 = off, >0 = number of peaks to mark
     label_summary: bool = False,   # mark vline at model-specific summary value
     no_legend: bool = False,       # suppress legend entirely
+    bins: int = 50,                # number of bins for histogram (0 disables)
 ):
     dist_idx, time_idx = MODEL_COLS[model]
+
+    # bins <= 0 means "no histograms"
+    plot_bins = bins is not None and bins > 0
 
     series: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
     all_dists = []
@@ -206,7 +210,6 @@ def plot_density(
     if xmin == xmax:
         xmax = xmin + 1e-9
     xpad = 0.02 * (xmax - xmin) if xmax > xmin else 0.01
-    xmin_plot = max(0.0, xmin - xpad)
     xmin_plot = xmin - xpad
     xmax_plot = xmax + xpad
 
@@ -222,9 +225,27 @@ def plot_density(
     for path, (d, _t) in series.items():
         bw = silverman_bandwidth(d)
         dens = kde_gaussian(d, xgrid, bw)
+
+        # First draw the KDE line (primary output)
         line, = ax.plot(xgrid, dens, linewidth=2, label=file_prefix_for_legend(path))
+        color = line.get_color()
+
+        # Then (optionally) overlay a mostly transparent histogram
+        # using the same color, behind the KDE line.
+        if plot_bins:
+            ax.hist(
+                d,
+                bins=bins,
+                density=True,
+                range=(xmin_plot, xmax_plot),
+                color=color,
+                alpha=0.2,        # mostly transparent
+                edgecolor='none',
+                zorder=0,         # behind the KDE line
+            )
+
         per_series[path] = {
-            "color": line.get_color(),
+            "color": color,
             "label": file_prefix_for_legend(path),
             "peak_xs": [],
             "summary": None,
@@ -362,6 +383,11 @@ def main():
         "--no-legend", action="store_true",
         help="Suppress the legend entirely (vlines will still be shown if requested)."
     )
+    parser.add_argument(
+        "--bins", type=int, default=50,
+        help=("Number of bins for per-series histograms (density scale). "
+              "Use 0 to disable histograms. Default: 50.")
+    )
 
     args = parser.parse_args()
     out_pdf = args.out if args.out else f"density_{args.model}.pdf"
@@ -371,6 +397,10 @@ def main():
         label_peaks = int(args.label_peaks)
     except ValueError:
         print("[error] --label-peaks must be an integer if provided with a value.", file=sys.stderr)
+        sys.exit(1)
+
+    if args.bins < 0:
+        print("[error] --bins must be >= 0.", file=sys.stderr)
         sys.exit(1)
 
     try:
@@ -383,6 +413,7 @@ def main():
             label_peaks=label_peaks,
             label_summary=args.label_summary,
             no_legend=args.no_legend,
+            bins=args.bins,
         )
     except Exception as e:
         print(f"[error] {e}", file=sys.stderr)
