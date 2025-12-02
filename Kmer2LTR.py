@@ -18,11 +18,55 @@ q = shlex.quote
 MIN_SEQ_BP = 80
 SCRIPT_DIR = Path(__file__).parent.resolve()
 
-# Select correct WFA binary depending on OS
-if platform.system() == "Darwin":  # macOS
+
+# ---------------- WFA binary selection with fallback ---------------- #
+# Tries wfa_linux1 first, then wfa_linux2. If both fail, instruct compile.
+
+def _test_wfa(bin_path: Path) -> bool:
+    """Return True if bin_path exists and can execute a trivial --help command."""
+    if not bin_path.exists():
+        return False
+    try:
+        # Use --help or -h depending on the binary's behavior; stderr ignored.
+        subprocess.run(
+            [str(bin_path), "-h"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=True
+        )
+        return True
+    except Exception:
+        return False
+
+if platform.system() == "Darwin":
     WFA_BIN = SCRIPT_DIR / "wfa_mac"
-else:  # default to Linux
-    WFA_BIN = SCRIPT_DIR / "wfa"
+    if not _test_wfa(WFA_BIN):
+        print("[ERROR] wfa_mac does not execute correctly. "
+              "Please compile wfa.cpp for macOS.", file=sys.stderr)
+        sys.exit(1)
+
+else:
+    # Linux: try two possible binaries
+    WFA1 = SCRIPT_DIR / "wfa_linux1"
+    WFA2 = SCRIPT_DIR / "wfa_linux2"
+
+    if _test_wfa(WFA1):
+        WFA_BIN = WFA1
+        print(f"[INFO] Using WFA binary: {WFA1}")
+    elif _test_wfa(WFA2):
+        WFA_BIN = WFA2
+        print(f"[INFO] Primary WFA failed; using fallback: {WFA2}")
+    else:
+        print(
+            "[FATAL] Neither wfa_linux1 nor wfa_linux2 executed successfully.\n"
+            "You may need to compile Kmer2LTR/wfa.cpp locally for your system.\n"
+            "To compile manually:\n"
+            "    g++ -O3 -o wfa_linux1 wfa.cpp\n",
+            file=sys.stderr
+        )
+        sys.exit(1)
+# -------------------------------------------------------------------- #
+
 
 
 # Global args/domains placeholders
@@ -940,3 +984,4 @@ if __name__ == "__main__":
             print("Density plot saved as kmer2ltr_density.pdf")
     else:
         print("Skipping plotting step (--no-plot).")
+        
