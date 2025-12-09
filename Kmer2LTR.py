@@ -469,168 +469,184 @@ def process_dir(dir_path):
       - If domains TSV provides a safe fast-path, extract LTRs directly with extension,
         then run MAFFT -> trimal -> WFA.
       - Otherwise run the original heavy pipeline (k-mers -> map -> filter -> extract LTRs -> MAFFT -> trimal -> WFA).
+
+    When ARGS.purge_subdirs is True, the per-sequence temp directory is removed
+    at the end of processing (even if skipped or errors occur).
     """
-    args = ARGS
-    verbose = args.verbose
-    out_file = args.outfile
-    dist = args.dist
-    kmin = args.kmin
-    kmax = args.kmax
-    std_factor = args.std_factor
-    extension = args.extension
-
     dir_path = Path(dir_path)
-    if ARGS.verbose:
-        print(f"Processing {dir_path}")
-    seq_fa = dir_path / "seq.fa"
-    # Header token (the same notion used for domains lookup)
-    with open(seq_fa) as fh:
-        first = next((ln for ln in fh if ln.startswith(">") ), None)
-    header_token = first[1:].strip().split()[0] if first else dir_path.name
 
-    seq_len = sum(len(line.strip()) for line in seq_fa.open() if not line.startswith(">"))
-
-    if seq_len < MIN_SEQ_BP:
-        log_msg(f"[SKIP] {dir_path.name} length {seq_len} < {MIN_SEQ_BP} bp; skipping as likely erroneous.")
-        try:
-            (dir_path / "SKIPPED.too_short").write_text(f"seq_len={seq_len}\nmin={MIN_SEQ_BP}\n")
-        except Exception:
-            pass
-        return
-
-    # ===== FAST-PATH TRY =====
     try:
-        if try_fast_path(dir_path, header_token, seq_len):
-            return
-    except Exception as e:
-        print(f"[FAST-PATH ERROR] {header_token}: {e}. Falling back to full pipeline.")
+        args = ARGS
+        verbose = args.verbose
+        out_file = args.outfile
+        dist = args.dist
+        kmin = args.kmin
+        kmax = args.kmax
+        std_factor = args.std_factor
+        extension = args.extension
 
-    # ===== ORIGINAL HEAVY PIPELINE =====
-
-    # K-mer counting and mapping
-    for k in range(kmin, kmax + 1):
-        jf_file = dir_path / "seq.jf"
-        run_cmd([
-            "jellyfish", "count", "-m", str(k), "-s", str(seq_len), "-t", "1",
-            "-o", str(jf_file), str(seq_fa)
-        ], verbose)
-
-        run_cmd([
-            "jellyfish", "dump", "-c", "-L", "2", "-U", "2",
-            "-o", str(dir_path / "kmer_duet.txt"), str(jf_file)
-        ], verbose)
-
-        mapped_file = dir_path / f"kmer_duet_k{k}.mapped"
-        run_cmd_output([
-            "python", str(SCRIPT_DIR / "map_kmers_to_fasta.py"),
-            str(dir_path / "kmer_duet.txt"), str(seq_fa),
-            "-d", str(dist)
-        ], mapped_file, verbose=verbose)
-
-    # Concatenate mapped kmers
-    combined_file = dir_path / f"kmer_duet_k{kmin}_{kmax}.mapped"
-    with open(combined_file, "w") as outfile:
-        for k in range(kmin, kmax + 1):
-            part = dir_path / f"kmer_duet_k{k}.mapped"
-            with open(part) as infile:
-                outfile.write(infile.read())
-
-    filtered_file = dir_path / f"kmer_duet_k{kmin}_{kmax}.mapped.filtered"
-    run_cmd([
-        "python", str(SCRIPT_DIR / "filter_kmers.py"), str(combined_file),
-        "--std-factor", str(std_factor),
-        "-o", str(filtered_file)
-    ], verbose)
-
-    # Short-circuit if empty or header-only
-    if not has_data_rows(filtered_file):
-        log_msg(f"[SKIP] No k-mer pairs after filtering for {dir_path.name} "
-              f"({filtered_file} is empty/header-only).")
-        try:
-            (dir_path / "SKIPPED.no_filtered_pairs").write_text("")
-        except Exception:
-            pass
-        return
-
-    # Extract LTRs
-    ltrs_fa = dir_path / "LTRs.fa"
-    run_cmd([
-        "python", str(SCRIPT_DIR / "extract_ltrs.py"),
-        "-e", str(extension),
-        str(filtered_file), str(seq_fa), str(ltrs_fa)
-    ], verbose)
-
-    # Align and trim
-    aln_fa = dir_path / "LTRs.aln.fa"
-    run_cmd_output([
-        "mafft", "--auto", "--thread", "1", str(ltrs_fa)
-    ], aln_fa, stderr=subprocess.DEVNULL, verbose=verbose)
-
-    run_cmd([
-        "trimal",
-        "-automated1",
-        "-keepheader",  # keep original headers
-        "-in", str(aln_fa),
-        "-out", str(dir_path / "LTRs.aln.clean")
-    ], verbose)
-
-    # ----- Short-circuit if trimmed alignment is too short vs raw alignment -----
-    try:
-        raw_bp = sum_ungapped_bp(aln_fa)                 # from "LTRs.aln.fa"
-        clean_bp = sum_ungapped_bp(dir_path / "LTRs.aln.clean")  # from "LTRs.aln.clean"
-    except FileNotFoundError as e:
-        print(f"[SKIP] Missing alignment file for {dir_path.name}: {e}")
-        try:
-            (dir_path / "SKIPPED.missing_alignment").write_text(str(e))
-        except Exception:
-            pass
-        return
-
-    # Require: sum_bp(clean) + extension > (min_retained_fraction * sum_bp(raw))
-    threshold = args.min_retained_fraction * raw_bp
-    
-    if (clean_bp + extension) <= threshold:
-        log_msg(
-            f"[SKIP] Trimmed alignment too short for {dir_path.name}: "
-            f"clean_bp({clean_bp}) + ext({extension}) <= "
-            f"{args.min_retained_fraction:.3f} * raw_bp({raw_bp:.0f})"
-        )
-        try:
-            (dir_path / "SKIPPED.too_trimmed").write_text(
-                f"raw_bp={raw_bp}\nclean_bp={clean_bp}\nextension={extension}\n"
-                f"min_retained_fraction={args.min_retained_fraction}\nthreshold={threshold}\n"
-            )
-        except Exception:
-            pass
-        return
-
-    # Compute proposed LTR len from LTRs.aln.fa headers and adjust by extension
-    proposed_len = parse_proposed_ltr_len_from_aln(aln_fa)
-    if proposed_len is None:
-        proposed_adj = 0
         if ARGS.verbose:
-            print(f"[WARN] Could not parse proposed LTR length for {dir_path.name}; inserting 0.")
-    else:
-        proposed_adj = max(proposed_len - ARGS.extension, 0)
+            print(f"Processing {dir_path}")
+        seq_fa = dir_path / "seq.fa"
 
+        # Header token (the same notion used for domains lookup)
+        with open(seq_fa) as fh:
+            first = next((ln for ln in fh if ln.startswith(">")), None)
+        header_token = first[1:].strip().split()[0] if first else dir_path.name
 
-    # Final WFA and append results
-    cmd_str = (
-        f"{q(str(WFA_BIN))} -E 10000 -e 10000 -o 10000 -O 10000 -u {args.mutation_rate} -W 50 "
-        f"{q(str(dir_path / 'LTRs.aln.clean'))}"
-        " | cut -f1,5- | sed -e 's/-0\\.000000/0.000000/g' | "
-        "awk -F'\t' '{if($1~/_(5prime|3prime)/) sub(/_(5prime|3prime).*$/, \"\", $1); print}' OFS='\t' | "
-        "awk '$6 <= 0.35' "
-        # Optional filter on last column (win_overdisp) if requested
-        + (f" | awk -v M={args.max_win_overdisp} '($NF+0) <= M' " if args.max_win_overdisp is not None else "")
-        # Always drop the three window cols (win_n, win_mean, win_overdisp)
-        + "| awk 'BEGIN{OFS=\"\\t\"} {if(NF>3) NF=NF-3; print}' "
-        + f"| awk -v P={proposed_adj} 'BEGIN{{OFS=\"\\t\"}} {{for(i=NF;i>=2;i--) $(i+1)=$(i); $2=P; print}}' "
-    )
-    if verbose:
-        print("Running:", cmd_str)
-    with open(out_file, "a") as ofile:
-        subprocess.run(cmd_str, shell=True, check=True, stdout=ofile)
+        seq_len = sum(len(line.strip()) for line in seq_fa.open() if not line.startswith(">"))
+
+        if seq_len < MIN_SEQ_BP:
+            log_msg(f"[SKIP] {dir_path.name} length {seq_len} < {MIN_SEQ_BP} bp; skipping as likely erroneous.")
+            try:
+                (dir_path / "SKIPPED.too_short").write_text(f"seq_len={seq_len}\nmin={MIN_SEQ_BP}\n")
+            except Exception:
+                pass
+            return
+
+        # ===== FAST-PATH TRY =====
+        try:
+            if try_fast_path(dir_path, header_token, seq_len):
+                return
+        except Exception as e:
+            print(f"[FAST-PATH ERROR] {header_token}: {e}. Falling back to full pipeline.")
+
+        # ===== ORIGINAL HEAVY PIPELINE =====
+
+        # K-mer counting and mapping
+        for k in range(kmin, kmax + 1):
+            jf_file = dir_path / "seq.jf"
+            run_cmd([
+                "jellyfish", "count", "-m", str(k), "-s", str(seq_len), "-t", "1",
+                "-o", str(jf_file), str(seq_fa)
+            ], verbose)
+
+            run_cmd([
+                "jellyfish", "dump", "-c", "-L", "2", "-U", "2",
+                "-o", str(dir_path / "kmer_duet.txt"), str(jf_file)
+            ], verbose)
+
+            mapped_file = dir_path / f"kmer_duet_k{k}.mapped"
+            run_cmd_output([
+                "python", str(SCRIPT_DIR / "map_kmers_to_fasta.py"),
+                str(dir_path / "kmer_duet.txt"), str(seq_fa),
+                "-d", str(dist)
+            ], mapped_file, verbose=verbose)
+
+        # Concatenate mapped kmers
+        combined_file = dir_path / f"kmer_duet_k{kmin}_{kmax}.mapped"
+        with open(combined_file, "w") as outfile:
+            for k in range(kmin, kmax + 1):
+                part = dir_path / f"kmer_duet_k{k}.mapped"
+                with open(part) as infile:
+                    outfile.write(infile.read())
+
+        filtered_file = dir_path / f"kmer_duet_k{kmin}_{kmax}.mapped.filtered"
+        run_cmd([
+            "python", str(SCRIPT_DIR / "filter_kmers.py"), str(combined_file),
+            "--std-factor", str(std_factor),
+            "-o", str(filtered_file)
+        ], verbose)
+
+        # Short-circuit if empty or header-only
+        if not has_data_rows(filtered_file):
+            log_msg(f"[SKIP] No k-mer pairs after filtering for {dir_path.name} "
+                    f"({filtered_file} is empty/header-only).")
+            try:
+                (dir_path / "SKIPPED.no_filtered_pairs").write_text("")
+            except Exception:
+                pass
+            return
+
+        # Extract LTRs
+        ltrs_fa = dir_path / "LTRs.fa"
+        run_cmd([
+            "python", str(SCRIPT_DIR / "extract_ltrs.py"),
+            "-e", str(extension),
+            str(filtered_file), str(seq_fa), str(ltrs_fa)
+        ], verbose)
+
+        # Align and trim
+        aln_fa = dir_path / "LTRs.aln.fa"
+        run_cmd_output([
+            "mafft", "--auto", "--thread", "1", str(ltrs_fa)
+        ], aln_fa, stderr=subprocess.DEVNULL, verbose=verbose)
+
+        run_cmd([
+            "trimal",
+            "-automated1",
+            "-keepheader",  # keep original headers
+            "-in", str(aln_fa),
+            "-out", str(dir_path / "LTRs.aln.clean")
+        ], verbose)
+
+        # ----- Short-circuit if trimmed alignment is too short vs raw alignment -----
+        try:
+            raw_bp = sum_ungapped_bp(aln_fa)                 # from "LTRs.aln.fa"
+            clean_bp = sum_ungapped_bp(dir_path / "LTRs.aln.clean")  # from "LTRs.aln.clean"
+        except FileNotFoundError as e:
+            print(f"[SKIP] Missing alignment file for {dir_path.name}: {e}")
+            try:
+                (dir_path / "SKIPPED.missing_alignment").write_text(str(e))
+            except Exception:
+                pass
+            return
+
+        # Require: sum_bp(clean) + extension > (min_retained_fraction * sum_bp(raw))
+        threshold = args.min_retained_fraction * raw_bp
+
+        if (clean_bp + extension) <= threshold:
+            log_msg(
+                f"[SKIP] Trimmed alignment too short for {dir_path.name}: "
+                f"clean_bp({clean_bp}) + ext({extension}) <= "
+                f"{args.min_retained_fraction:.3f} * raw_bp({raw_bp:.0f})"
+            )
+            try:
+                (dir_path / "SKIPPED.too_trimmed").write_text(
+                    f"raw_bp={raw_bp}\nclean_bp={clean_bp}\nextension={extension}\n"
+                    f"min_retained_fraction={args.min_retained_fraction}\nthreshold={threshold}\n"
+                )
+            except Exception:
+                pass
+            return
+
+        # Compute proposed LTR len from LTRs.aln.fa headers and adjust by extension
+        proposed_len = parse_proposed_ltr_len_from_aln(aln_fa)
+        if proposed_len is None:
+            proposed_adj = 0
+            if ARGS.verbose:
+                print(f"[WARN] Could not parse proposed LTR length for {dir_path.name}; inserting 0.")
+        else:
+            proposed_adj = max(proposed_len - ARGS.extension, 0)
+
+        # Final WFA and append results
+        cmd_str = (
+            f"{q(str(WFA_BIN))} -E 10000 -e 10000 -o 10000 -O 10000 -u {args.mutation_rate} -W 50 "
+            f"{q(str(dir_path / 'LTRs.aln.clean'))}"
+            " | cut -f1,5- | sed -e 's/-0\\.000000/0.000000/g' | "
+            "awk -F'\t' '{if($1~/_(5prime|3prime)/) sub(/_(5prime|3prime).*$/, \"\", $1); print}' OFS='\t' | "
+            "awk '$6 <= 0.35' "
+            # Optional filter on last column (win_overdisp) if requested
+            + (f" | awk -v M={args.max_win_overdisp} '($NF+0) <= M' " if args.max_win_overdisp is not None else "")
+            # Always drop the three window cols (win_n, win_mean, win_overdisp)
+            + "| awk 'BEGIN{OFS=\"\\t\"} {if(NF>3) NF=NF-3; print}' "
+            + f"| awk -v P={proposed_adj} 'BEGIN{{OFS=\"\\t\"}} {{for(i=NF;i>=2;i--) $(i+1)=$(i); $2=P; print}}' "
+        )
+        if verbose:
+            print("Running:", cmd_str)
+        with open(out_file, "a") as ofile:
+            subprocess.run(cmd_str, shell=True, check=True, stdout=ofile)
+
+    finally:
+        # Always try to remove the subdir if purge_subdirs is enabled
+        if getattr(ARGS, "purge_subdirs", False):
+            try:
+                shutil.rmtree(dir_path)
+            except FileNotFoundError:
+                # already removed or never created; that's fine
+                pass
+            except Exception as e:
+                log_msg(f"[WARN] Failed to remove temp subdir {dir_path}: {e}")
 
 def write_summary(main_out_path: str):
     """
@@ -850,6 +866,14 @@ if __name__ == "__main__":
         help="Keep temp directory after processing."
     )
     parser.add_argument(
+        "--purge-subdirs", action="store_true", dest="purge_subdirs",
+        help=(
+            "After each sequence directory finishes processing (including skips/errors), "
+            "delete its temp subdirectory to keep file counts low. "
+            "Mutually exclusive with -k/--keep_temp."
+        )
+    )
+    parser.add_argument(
         "-v", action="store_true", dest="verbose",
         help="Verbose mode; print each command before executing."
     )
@@ -904,8 +928,13 @@ if __name__ == "__main__":
         )
     )
     parser.add_argument(
-        "--max-win-overdisp", type=float, default=None, dest="max_win_overdisp",
-        help="If set, exclude alignments with window overdispersion (win_overdisp) greater than this value."
+        "--max-win-overdisp", type=float, default=6, dest="max_win_overdisp",
+        help=(
+            "Maximum allowed window overdispersion (win_overdisp). "
+            "Lower values are more specific (aggressive filtering), "
+            "higher values are more sensitive (retains more outputs). "
+            "Default: 6."
+        )
     )
 
     parser.add_argument(
@@ -934,6 +963,10 @@ if __name__ == "__main__":
 #    )
 
     args = parser.parse_args()
+
+    # Enforce mutual exclusivity: keep_temp vs purge_subdirs
+    if args.keep_temp and args.purge_subdirs:
+        parser.error("Options -k/--keep_temp and --purge-subdirs are mutually exclusive.")
 
     # Multi-input mode check and warnings for -t/-o
     multi_mode = len(args.input_fastas) > 1
@@ -984,4 +1017,3 @@ if __name__ == "__main__":
             print("Density plot saved as kmer2ltr_density.pdf")
     else:
         print("Skipping plotting step (--no-plot).")
-        
