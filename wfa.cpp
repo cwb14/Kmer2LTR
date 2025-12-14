@@ -4,11 +4,12 @@
 #include <string>
 #include <vector>
 #include <cstdlib>
-#include <unistd.h>   // for getopt
+#include <unistd.h>   // getopt
 #include <iomanip>
 #include <cmath>
 #include <cctype>
 #include <algorithm>
+#include <limits>
 #include "bindings/cpp/WFAligner.hpp"
 
 // g++ -O3 -std=c++11 wavefront_twoseq_stats_time.cpp \
@@ -48,10 +49,12 @@ void print_usage(const char* prog) {
          << "  -u <float>      mutation rate \xCE\xBC (default 3e-8)\n"
          << "  -W <int>        window size for p-distance metrics (0=off)\n"
          << "  -S <int>        slide size (default W/2)\n"
+         << "  -k <int>        trim unreliable ends: require k consecutive matches to enter/exit reliable region (default 0=off)\n"
+         << "  -d              debug: print a 3-line alignment view to stderr (also prints 5' and 3' k-mers around boundaries)\n"
          << "  -h              show this help message\n\n"
          << "Output columns:\n"
          << "  header1, header2, CIGAR, [identity if full],\n"
-         << "  total_length, total_substitutions, transitions, transversions,\n"
+         << "  reliable_pairs, total_substitutions, transitions, transversions,\n"
          << "  raw_d, raw_T, JC69_d, JC69_T, K2P_d, K2P_T,\n"
          << "  [if -W>0: win_n, win_mean, win_overdisp]\n";
 }
@@ -84,92 +87,330 @@ bool read_two_fasta(const string& path, string& h1, string& s1, string& h2, stri
     return true;
 }
 
-double compute_gc_identity(const string& cigar) {
-    long matches = 0, mismatches = 0, gaps = 0;
-    int  num = 0;
-    for (char c : cigar) {
-        if (isdigit(c)) {
-            num = num * 10 + (c - '0');
-        } else {
-            switch (c) {
-                case '=': matches    += num; break;
-                case 'X': mismatches += num; break;
-                case 'D': case 'I': gaps += 1;   break;
-                default:               break;
-            }
-            num = 0;
-        }
-    }
-    return double(matches) / (matches + mismatches + gaps);
-}
+// ---------- Debug alignment pretty-printer ----------
+struct AlignView {
+    string a1, mid, a2;
+};
 
-void count_substitutions(
-    const string& cigar,
-    const string& s1,
-    const string& s2,
-    long &total_subs,
-    long &transitions,
-    long &transversions
-) {
+static AlignView build_alignment_view(const string& cigar,
+                                     const string& s1,
+                                     const string& s2) {
+    // Supports WFA "full" CIGAR (= X I D) and SAM-style (M = X I D).
+    AlignView v;
+    v.a1.reserve(cigar.size());
+    v.a2.reserve(cigar.size());
+    v.mid.reserve(cigar.size());
+
     size_t i = 0, j = 0, pos = 0;
-    total_subs = transitions = transversions = 0;
     while (pos < cigar.size()) {
         int num = 0;
-        while (pos < cigar.size() && isdigit(cigar[pos])) {
+        while (pos < cigar.size() && isdigit((unsigned char)cigar[pos])) {
             num = num * 10 + (cigar[pos++] - '0');
         }
         if (pos >= cigar.size()) break;
         char op = cigar[pos++];
-        if (op == '=') {
-            i += num;  j += num;
-        } else if (op == 'X') {
+
+        if (op == '=' || op == 'X' || op == 'M') {
             for (int k = 0; k < num; ++k) {
-                char a = toupper(s1[i++]);
-                char b = toupper(s2[j++]);
-                ++total_subs;
-                // transitions: A<->G or C<->T
-                if ((a=='A' && b=='G') || (a=='G' && b=='A') ||
-                    (a=='C' && b=='T') || (a=='T' && b=='C')) {
-                        ++transitions;
-                } else {
-                        ++transversions;
+                char a = (i < s1.size()) ? s1[i++] : '-';
+                char b = (j < s2.size()) ? s2[j++] : '-';
+                char ua = toupper((unsigned char)a);
+                char ub = toupper((unsigned char)b);
+
+                v.a1.push_back(ua);
+                v.a2.push_back(ub);
+
+                if (op == '=') {
+                    v.mid.push_back('|');
+                } else if (op == 'X') {
+                    v.mid.push_back('*');
+                } else { // 'M' (SAM): decide by base comparison
+                    v.mid.push_back(ua == ub ? '|' : '*');
                 }
             }
         } else if (op == 'D') {
-            i += num;
+            for (int k = 0; k < num; ++k) {
+                char a = (i < s1.size()) ? toupper((unsigned char)s1[i++]) : '-';
+                v.a1.push_back(a);
+                v.mid.push_back(' ');
+                v.a2.push_back('-');
+            }
         } else if (op == 'I') {
-            j += num;
+            for (int k = 0; k < num; ++k) {
+                char b = (j < s2.size()) ? toupper((unsigned char)s2[j++]) : '-';
+                v.a1.push_back('-');
+                v.mid.push_back(' ');
+                v.a2.push_back(b);
+            }
+        } else {
+            // Unknown op: ignore
         }
+    }
+    return v;
+}
+
+static void print_alignment_view(const AlignView& v, ostream& os, size_t width=80) {
+    for (size_t p = 0; p < v.a1.size(); p += width) {
+        os << v.a1.substr(p, width) << "\n";
+        os << v.mid.substr(p, width) << "\n";
+        os << v.a2.substr(p, width) << "\n\n";
     }
 }
 
-// ---------- Window p-distances from full CIGAR ----------
-static vector<int> mismatch_series_from_cigar(const string& cigar) {
-    // 1 element per aligned PAIR (= or X). 0 for match, 1 for mismatch. Gaps are skipped.
-    vector<int> mm;
-    size_t pos = 0;
-    while (pos < cigar.size()) {
+// ---------- Reliable region detection (k consecutive matches) ----------
+struct ReliableBounds {
+    // Alignment-column coordinates (including gaps) in [start_col, end_col_excl)
+    size_t start_col = 0;
+    size_t end_col_excl = 0;
+    bool   enabled = false;
+    bool   found = false;
+};
+
+static inline bool is_match_op(char op,
+                               bool format_full,
+                               const string& s1, const string& s2,
+                               size_t i, size_t j) {
+    if (format_full) {
+        return op == '=';
+    } else {
+        // SAM: 'M' can be match or mismatch; '=' may appear too depending on source
+        if (op == '=') return true;
+        if (op == 'X') return false;
+        if (op == 'M') {
+            if (i >= s1.size() || j >= s2.size()) return false;
+            char a = toupper((unsigned char)s1[i]);
+            char b = toupper((unsigned char)s2[j]);
+            return a == b;
+        }
+        return false;
+    }
+}
+
+static ReliableBounds find_reliable_bounds_k(const string& cigar,
+                                            const string& s1,
+                                            const string& s2,
+                                            bool format_full,
+                                            int k) {
+    ReliableBounds rb;
+    rb.end_col_excl = 0;
+    rb.start_col = 0;
+    rb.enabled = (k > 0);
+
+    // If k disabled, whole alignment is reliable (we still need total alignment length in cols)
+    // We'll compute alignment length in cols regardless.
+    auto compute_alignment_cols = [&]() -> size_t {
+        size_t cols = 0;
+        size_t pos = 0;
+        while (pos < cigar.size()) {
+            int num = 0;
+            while (pos < cigar.size() && isdigit((unsigned char)cigar[pos])) {
+                num = num * 10 + (cigar[pos++] - '0');
+            }
+            if (pos >= cigar.size()) break;
+            char op = cigar[pos++];
+            if (op=='=' || op=='X' || op=='M' || op=='I' || op=='D') cols += (size_t)num;
+        }
+        return cols;
+    };
+
+    const size_t aln_cols = compute_alignment_cols();
+    rb.end_col_excl = aln_cols;
+
+    if (!rb.enabled) {
+        rb.found = true;
+        rb.start_col = 0;
+        rb.end_col_excl = aln_cols;
+        return rb;
+    }
+
+    // Forward scan: find first run of k consecutive matches on aligned PAIRS only (not gaps).
+    size_t i = 0, j = 0, pos = 0, col = 0;
+    int run = 0;
+    bool have_start = false;
+    size_t start_col = 0;
+
+    while (pos < cigar.size() && !have_start) {
         int num = 0;
-        while (pos < cigar.size() && isdigit(cigar[pos])) {
+        while (pos < cigar.size() && isdigit((unsigned char)cigar[pos])) {
             num = num * 10 + (cigar[pos++] - '0');
         }
         if (pos >= cigar.size()) break;
         char op = cigar[pos++];
-        if (op == '=') {
-            mm.insert(mm.end(), (size_t)num, 0);
-        } else if (op == 'X') {
-            mm.insert(mm.end(), (size_t)num, 1);
+
+        if (op=='=' || op=='X' || op=='M') {
+            for (int t=0; t<num; ++t) {
+                bool m = is_match_op(op, format_full, s1, s2, i, j);
+                // advance indices for aligned pair
+                if (i < s1.size()) ++i; else {}
+                if (j < s2.size()) ++j; else {}
+                // alignment column advances
+                ++col;
+
+                if (m) {
+                    ++run;
+                    if (run >= k) {
+                        start_col = col - (size_t)k; // first col of this k-run (0-based)
+                        have_start = true;
+                        break;
+                    }
+                } else {
+                    run = 0;
+                }
+            }
+        } else if (op=='D') {
+            // gap in query; NOT an aligned pair; reset run
+            i = min(s1.size(), i + (size_t)num);
+            col += (size_t)num;
+            run = 0;
+        } else if (op=='I') {
+            // gap in ref; NOT an aligned pair; reset run
+            j = min(s2.size(), j + (size_t)num);
+            col += (size_t)num;
+            run = 0;
         } else {
-            // I or D -> skip; not aligned pairs
+            // unknown op; ignore
         }
     }
-    return mm;
+
+    // Backward scan: find last run of k consecutive matches (aligned pairs only), from the end.
+    // Easiest: build AlignView mid string once and scan it, treating '|' as match, '*' mismatch,
+    // and ' ' (gap) as reset (not aligned pairs).
+    AlignView av = build_alignment_view(cigar, s1, s2);
+    // av.mid length == alignment columns
+    size_t end_excl = av.mid.size();
+    int rrun = 0;
+    bool have_end = false;
+    size_t end_col_excl = end_excl;
+
+    for (size_t idx = end_excl; idx-- > 0; ) {
+        char m = av.mid[idx];
+        if (m == '|') {
+            ++rrun;
+            if (rrun >= k) {
+                // idx is the first position of the reverse k-run (from the end),
+                // and (idx + k - 1) is the last match position of that run.
+                size_t last_match_pos = idx + (size_t)k - 1;
+                end_col_excl = last_match_pos + 1; // exclusive
+                have_end = true;
+                break;
+            }
+        } else if (m == '*') {
+            rrun = 0;
+        } else {
+            // gap column
+            rrun = 0;
+        }
+    }
+
+    rb.found = have_start && have_end && (start_col < end_col_excl);
+    if (rb.found) {
+        rb.start_col = start_col;
+        rb.end_col_excl = end_col_excl;
+    } else {
+        // If we can't find k consecutive matches on one/both ends, fall back to whole alignment.
+        rb.start_col = 0;
+        rb.end_col_excl = aln_cols;
+        rb.found = false; // indicates fallback
+    }
+    return rb;
 }
+
+// ---------- Stats within reliable region ----------
+struct RegionStats {
+    long pairs = 0;          // aligned pairs (match+mismatch)
+    long matches = 0;
+    long mismatches = 0;
+    long gap_cols = 0;       // alignment columns that are gaps (I or D)
+    long total_subs = 0;
+    long transitions = 0;
+    long transversions = 0;
+
+    vector<int> mm_series;   // 0/1 for aligned pairs only (for window pdist), within region
+};
+
+static RegionStats compute_region_stats(const string& cigar,
+                                        const string& s1,
+                                        const string& s2,
+                                        bool format_full,
+                                        size_t start_col,
+                                        size_t end_col_excl) {
+    RegionStats st;
+    st.mm_series.reserve(end_col_excl > start_col ? (end_col_excl - start_col) : 0);
+
+    size_t i = 0, j = 0, pos = 0, col = 0;
+
+    while (pos < cigar.size() && col < end_col_excl) {
+        int num = 0;
+        while (pos < cigar.size() && isdigit((unsigned char)cigar[pos])) {
+            num = num * 10 + (cigar[pos++] - '0');
+        }
+        if (pos >= cigar.size()) break;
+        char op = cigar[pos++];
+
+        if (op=='=' || op=='X' || op=='M') {
+            for (int t=0; t<num; ++t) {
+                bool in_region = (col >= start_col && col < end_col_excl);
+                bool match = is_match_op(op, format_full, s1, s2, i, j);
+
+                char a = (i < s1.size()) ? toupper((unsigned char)s1[i]) : 'N';
+                char b = (j < s2.size()) ? toupper((unsigned char)s2[j]) : 'N';
+
+                // advance indices and column
+                if (i < s1.size()) ++i;
+                if (j < s2.size()) ++j;
+                ++col;
+
+                if (!in_region) continue;
+
+                ++st.pairs;
+                if (match) {
+                    ++st.matches;
+                    st.mm_series.push_back(0);
+                } else {
+                    ++st.mismatches;
+                    st.mm_series.push_back(1);
+                    ++st.total_subs;
+                    // transitions: A<->G or C<->T
+                    if ((a=='A' && b=='G') || (a=='G' && b=='A') ||
+                        (a=='C' && b=='T') || (a=='T' && b=='C')) {
+                        ++st.transitions;
+                    } else {
+                        ++st.transversions;
+                    }
+                }
+            }
+        } else if (op=='D') {
+            for (int t=0; t<num; ++t) {
+                bool in_region = (col >= start_col && col < end_col_excl);
+                if (i < s1.size()) ++i;
+                ++col;
+                if (in_region) ++st.gap_cols;
+            }
+        } else if (op=='I') {
+            for (int t=0; t<num; ++t) {
+                bool in_region = (col >= start_col && col < end_col_excl);
+                if (j < s2.size()) ++j;
+                ++col;
+                if (in_region) ++st.gap_cols;
+            }
+        } else {
+            // ignore unknown
+        }
+    }
+    return st;
+}
+
+static double compute_identity_region(long matches, long mismatches, long gap_cols) {
+    double denom = double(matches) + double(mismatches) + double(gap_cols);
+    if (denom <= 0.0) return NAN;
+    return double(matches) / denom;
+}
+
+// ---------- Window p-distances on aligned pairs only ----------
 static vector<double> sliding_pdist(const vector<int>& mm, int W, int S) {
     vector<double> out;
     if (W <= 0 || mm.empty()) return out;
     if (S <= 0) S = max(1, W/2);
-    // prefix sums
     vector<int> pref(mm.size()+1, 0);
     for (size_t i=0;i<mm.size();++i) pref[i+1] = pref[i] + mm[i];
     for (int start = 0; start + W <= (int)mm.size(); start += S) {
@@ -183,6 +424,36 @@ static vector<double> sliding_pdist(const vector<int>& mm, int W, int S) {
         out.push_back(double(mism) / double(W2));
     }
     return out;
+}
+
+static void print_boundary_kmers(const AlignView& av,
+                                 size_t start_col, size_t end_col_excl,
+                                 int k, ostream& os) {
+    if (k <= 0 || av.mid.empty()) return;
+
+    os << "---- Reliable region (alignment cols) ----\n";
+    os << "start_col=" << start_col << ", end_col_excl=" << end_col_excl
+       << ", length=" << (end_col_excl > start_col ? (end_col_excl - start_col) : 0) << "\n";
+
+    // 5' k columns of reliable region
+    size_t left_len = min<size_t>((size_t)k, (end_col_excl > start_col ? end_col_excl - start_col : 0));
+    if (left_len > 0) {
+        os << "[5' first " << left_len << " cols]\n";
+        os << av.a1.substr(start_col, left_len) << "\n";
+        os << av.mid.substr(start_col, left_len) << "\n";
+        os << av.a2.substr(start_col, left_len) << "\n";
+    }
+
+    // 3' k columns of reliable region
+    size_t right_len = left_len;
+    if (right_len > 0) {
+        size_t right_start = end_col_excl - right_len;
+        os << "[3' last " << right_len << " cols]\n";
+        os << av.a1.substr(right_start, right_len) << "\n";
+        os << av.mid.substr(right_start, right_len) << "\n";
+        os << av.a2.substr(right_start, right_len) << "\n";
+    }
+    os << "-----------------------------------------\n";
 }
 
 // ---------- Main ----------
@@ -200,9 +471,14 @@ int main(int argc, char** argv) {
     int W = 0;   // window size (0=disabled)
     int S = 0;   // slide (0 => W/2)
 
+    // boundary trimming
+    int ktrim = 0; // 0=off
+
+    bool debug = false;
+
     // parse options
     int opt;
-    while ((opt = getopt(argc, argv, "x:O:E:o:e:c:u:W:S:h")) != -1) {
+    while ((opt = getopt(argc, argv, "x:O:E:o:e:c:u:W:S:k:dh")) != -1) {
         switch (opt) {
             case 'x': mismatch = stoi(optarg);   break;
             case 'O': go1      = stoi(optarg);   break;
@@ -213,6 +489,8 @@ int main(int argc, char** argv) {
             case 'u': miu      = stod(optarg);   break;
             case 'W': W        = stoi(optarg);   break;
             case 'S': S        = stoi(optarg);   break;
+            case 'k': ktrim    = stoi(optarg);   break;
+            case 'd': debug    = true;           break;
             case 'h':
             default:
                 print_usage(argv[0]);
@@ -224,6 +502,8 @@ int main(int argc, char** argv) {
         print_usage(argv[0]);
         return 1;
     }
+    if (ktrim < 0) ktrim = 0;
+
     if (optind + 1 != argc) {
         print_usage(argv[0]);
         return 1;
@@ -250,30 +530,69 @@ int main(int argc, char** argv) {
 
     // get CIGAR
     string cigar = aligner.getCIGAR(format=="full");
+    const bool format_full = (format == "full");
 
-    // compute substitution statistics
-    long total_subs, trans_count, transv_count;
-    count_substitutions(cigar, s1, s2, total_subs, trans_count, transv_count);
+    // determine reliable region bounds in alignment columns
+    ReliableBounds rb = find_reliable_bounds_k(cigar, s1, s2, format_full, ktrim);
 
-    // compute distances
-    double tot_len = double(s1.size());
-    double raw_d    = (trans_count + transv_count) / tot_len;
-    double P        = trans_count / tot_len;
-    double Q        = transv_count / tot_len;
-    double JC69_d   = -0.75 * log(1.0 - (4.0 * raw_d / 3.0));
-    double K2P_d    = -0.5 * log((1.0 - 2.0*P - Q) * sqrt(1.0 - 2.0*Q));
+    // build alignment view for debug (and boundary k-mers)
+    AlignView av;
+    if (debug || ktrim > 0) {
+        av = build_alignment_view(cigar, s1, s2);
+    }
 
-    long raw_T  = lround(raw_d  / (2.0 * miu));
-    long JC69_T = lround(JC69_d / (2.0 * miu));
-    long K2P_T  = lround(K2P_d  / (2.0 * miu));
+    // debug: print alignment view (to stderr, so stdout stays parseable)
+    if (debug) {
+        cerr << "==== Alignment (" << h1 << " vs " << h2 << ") ====\n";
+        print_alignment_view(av, cerr, 80);
+        if (ktrim > 0) {
+            if (!rb.found) {
+                cerr << "Note: -k " << ktrim << " could not find k consecutive matches on one/both ends; using full alignment.\n";
+            }
+            print_boundary_kmers(av, rb.start_col, rb.end_col_excl, ktrim, cerr);
+        }
+        cerr << "==== End alignment ====\n";
+    }
 
-    // ---------- Sliding-window metrics (reduced) ----------
+    // compute stats within reliable region (or full if ktrim=0 / fallback)
+    RegionStats st = compute_region_stats(cigar, s1, s2, format_full, rb.start_col, rb.end_col_excl);
+
+    // denominator for divergence: aligned PAIRS only within reliable region
+    double denom = double(st.pairs);
+    double raw_d = NAN, P = NAN, Q = NAN, JC69_d = NAN, K2P_d = NAN;
+    long raw_T = 0, JC69_T = 0, K2P_T = 0;
+
+    if (denom > 0) {
+        raw_d = double(st.transitions + st.transversions) / denom;
+        P     = double(st.transitions) / denom;
+        Q     = double(st.transversions) / denom;
+
+        // Guard against invalid logs due to saturation / rounding
+        double jc_arg = 1.0 - (4.0 * raw_d / 3.0);
+        if (jc_arg > 0.0) JC69_d = -0.75 * log(jc_arg);
+
+        double k2_a = (1.0 - 2.0*P - Q);
+        double k2_b = (1.0 - 2.0*Q);
+        if (k2_a > 0.0 && k2_b > 0.0) K2P_d = -0.5 * log(k2_a * sqrt(k2_b));
+
+        if (std::isfinite(raw_d))  raw_T  = lround(raw_d  / (2.0 * miu));
+        if (std::isfinite(JC69_d)) JC69_T = lround(JC69_d / (2.0 * miu));
+        if (std::isfinite(K2P_d))  K2P_T  = lround(K2P_d  / (2.0 * miu));
+    }
+
+    // identity (only printed for full CIGAR output; uses region)
+    double id = NAN;
+    if (format_full) {
+        id = compute_identity_region(st.matches, st.mismatches, st.gap_cols);
+    }
+
+    // ---------- Sliding-window metrics (on aligned pairs only, within reliable region) ----------
     vector<double> win_p;
     int used_W = W, used_S = S;
-    if (format=="full" && W > 0) {
-        vector<int> mm = mismatch_series_from_cigar(cigar);
+    if (W > 0) {
+        // windowing now applies to the aligned-pair mismatch series within region
         if (used_S <= 0) used_S = max(1, used_W/2);
-        win_p = sliding_pdist(mm, used_W, used_S);
+        win_p = sliding_pdist(st.mm_series, used_W, used_S);
     }
 
     size_t win_n = win_p.size();
@@ -297,23 +616,22 @@ int main(int argc, char** argv) {
     // output results
     cout << h1 << "\t" << h2 << "\t" << cigar;
     if (format=="full") {
-        double id = compute_gc_identity(cigar);
         cout << "\t" << fixed << setprecision(6) << id;
     }
     cout << "\t"
-         << long(tot_len) << "\t"
-         << total_subs << "\t"
-         << trans_count << "\t"
-         << transv_count << "\t"
+         << st.pairs << "\t"
+         << st.total_subs << "\t"
+         << st.transitions << "\t"
+         << st.transversions << "\t"
          << fixed << setprecision(6)
-         << raw_d    << "\t"
+         << (std::isfinite(raw_d)  ? raw_d  : NAN) << "\t"
          << raw_T    << "\t"
-         << JC69_d   << "\t"
+         << (std::isfinite(JC69_d) ? JC69_d : NAN) << "\t"
          << JC69_T   << "\t"
-         << K2P_d    << "\t"
+         << (std::isfinite(K2P_d)  ? K2P_d  : NAN) << "\t"
          << K2P_T;
 
-    if (format=="full" && W > 0) {
+    if (W > 0) {
         cout << "\t" << win_n
              << "\t" << setprecision(6) << win_mean
              << "\t" << setprecision(6) << win_overdisp;
