@@ -443,7 +443,7 @@ def try_fast_path(dir_path: Path, header_token: str, seq_len: int) -> bool:
 
     # Final WFA and append results (same filtering as heavy path)
     cmd_str = (
-        f"{q(str(WFA_BIN))} -E 10000 -e 10000 -o 10000 -O 10000 -u {ARGS.mutation_rate} -W 50 "
+        f"{q(str(WFA_BIN))} -E 10000 -e 10000 -o 10000 -O 10000 -u {ARGS.mutation_rate} -W 50 -k 7 "
         f"{q(str(dir_path / 'LTRs.aln.clean'))}"
         " | cut -f1,5- | sed -e 's/-0\\.000000/0.000000/g' | "
         "awk -F'\t' '{if($1~/_(5prime|3prime)/) sub(/_(5prime|3prime).*$/, \"\", $1); print}' OFS='\t' | "
@@ -621,7 +621,7 @@ def process_dir(dir_path):
 
         # Final WFA and append results
         cmd_str = (
-            f"{q(str(WFA_BIN))} -E 10000 -e 10000 -o 10000 -O 10000 -u {args.mutation_rate} -W 50 "
+            f"{q(str(WFA_BIN))} -E 10000 -e 10000 -o 10000 -O 10000 -u {args.mutation_rate} -W 50 -k 7 "
             f"{q(str(dir_path / 'LTRs.aln.clean'))}"
             " | cut -f1,5- | sed -e 's/-0\\.000000/0.000000/g' | "
             "awk -F'\t' '{if($1~/_(5prime|3prime)/) sub(/_(5prime|3prime).*$/, \"\", $1); print}' OFS='\t' | "
