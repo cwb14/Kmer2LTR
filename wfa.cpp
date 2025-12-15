@@ -17,6 +17,9 @@
 //     -I./WFA2-lib -I./WFA2-lib/bindings/cpp \
 //     ./WFA2-lib/build/libwfa2.a -o wavefront_twoseq_stats_time
 
+// -K is added to test if its better to include k bases in alignment length or to exclude them... benchmarking suggests its better to exclude (use K). I guess because k bases are, by definition, always matching... including those bases in aln length appears to artificially inflate seq identity.
+// In sort, its likely best to use '-k 5 -K' although the k [int] is not extensively tested. Including '-k [int]' appears to be important with empirical data where the LTR-RT may not have been precisely provided from start to end. Any extra bp tacked onto the LTR-RT appear to inflate divergence since theyre likely not perfect identity. With '-k [int]', we can exclude counting them.  
+
 using namespace std;
 using namespace wfa;
 
@@ -50,6 +53,7 @@ void print_usage(const char* prog) {
          << "  -W <int>        window size for p-distance metrics (0=off)\n"
          << "  -S <int>        slide size (default W/2)\n"
          << "  -k <int>        trim unreliable ends: require k consecutive matches to enter/exit reliable region (default 0=off)\n"
+         << "  -K              exclude the k boundary-match columns from the reliable region metrics (requires -k>0 and successful trimming)\n"
          << "  -d              debug: print a 3-line alignment view to stderr (also prints 5' and 3' k-mers around boundaries)\n"
          << "  -h              show this help message\n\n"
          << "Output columns:\n"
@@ -475,10 +479,13 @@ int main(int argc, char** argv) {
     int ktrim = 0; // 0=off
 
     bool debug = false;
+    bool exclude_k = false;
 
     // parse options
     int opt;
-    while ((opt = getopt(argc, argv, "x:O:E:o:e:c:u:W:S:k:dh")) != -1) {
+
+    while ((opt = getopt(argc, argv, "x:O:E:o:e:c:u:W:S:k:Kdh")) != -1) {
+
         switch (opt) {
             case 'x': mismatch = stoi(optarg);   break;
             case 'O': go1      = stoi(optarg);   break;
@@ -490,6 +497,7 @@ int main(int argc, char** argv) {
             case 'W': W        = stoi(optarg);   break;
             case 'S': S        = stoi(optarg);   break;
             case 'k': ktrim    = stoi(optarg);   break;
+            case 'K': exclude_k = true;          break;
             case 'd': debug    = true;           break;
             case 'h':
             default:
@@ -535,6 +543,21 @@ int main(int argc, char** argv) {
     // determine reliable region bounds in alignment columns
     ReliableBounds rb = find_reliable_bounds_k(cigar, s1, s2, format_full, ktrim);
 
+    // Effective bounds used for stats/identity/divergence
+    size_t eff_start = rb.start_col;
+    size_t eff_end_excl = rb.end_col_excl;
+
+    // Optionally exclude the k boundary-match columns from metrics
+    if (exclude_k && ktrim > 0 && rb.found) {
+        // Remove k columns from each side (these are guaranteed matches by construction)
+        eff_start = min(eff_start + (size_t)ktrim, eff_end_excl);
+        if (eff_end_excl >= (size_t)ktrim) {
+            eff_end_excl = max(eff_start, eff_end_excl - (size_t)ktrim);
+        } else {
+            eff_end_excl = eff_start;
+        }
+    }
+
     // build alignment view for debug (and boundary k-mers)
     AlignView av;
     if (debug || ktrim > 0) {
@@ -555,7 +578,7 @@ int main(int argc, char** argv) {
     }
 
     // compute stats within reliable region (or full if ktrim=0 / fallback)
-    RegionStats st = compute_region_stats(cigar, s1, s2, format_full, rb.start_col, rb.end_col_excl);
+    RegionStats st = compute_region_stats(cigar, s1, s2, format_full, eff_start, eff_end_excl);
 
     // denominator for divergence: aligned PAIRS only within reliable region
     double denom = double(st.pairs);
