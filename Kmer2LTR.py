@@ -404,7 +404,7 @@ def try_fast_path(dir_path: Path, header_token: str, seq_len: int) -> bool:
 
     run_cmd([
         "trimal",
-        "-automated1",
+        "-automated1",  # -strictplus might be better... at least it appears better with 'python Kmer2LTR/lib_mutator.py -i lib_clean.fa -mp 10 -TiTv 2 -idel_freq 0.05 -idel_size 1,5'
         "-keepheader",
         "-in", str(aln_fa),
         "-out", str(dir_path / "LTRs.aln.clean")
@@ -574,7 +574,7 @@ def process_dir(dir_path):
 
         run_cmd([
             "trimal",
-            "-automated1",
+            "-automated1",  # -strictplus might be better... at least it appears better with 'python Kmer2LTR/lib_mutator.py -i lib_clean.fa -mp 10 -TiTv 2 -idel_freq 0.05 -idel_size 1,5'
             "-keepheader",  # keep original headers
             "-in", str(aln_fa),
             "-out", str(dir_path / "LTRs.aln.clean")
