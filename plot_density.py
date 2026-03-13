@@ -1,13 +1,24 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""
+Plot histogram density of LTR-RT divergence.
+
+Bottom X-axis: genetic distance (p, JC69, or K2P)
+Top X-axis:    time in millions of years ago (MYA)
+Y-axis:        density (histogram area = 1)
+
+Peak detection uses histogram bin heights directly, with optional
+moving-average smoothing and prominence filtering to suppress noise
+while faithfully representing the data.
+"""
 
 import argparse
 import os
 import sys
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Optional, Union
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.lines import Line2D  # <-- used for legend proxies
+from matplotlib.lines import Line2D
 
 # ----------------------------
 # Column map (0-based indices)
@@ -50,12 +61,14 @@ def read_tsv_cols(path: str, dist_idx: int, time_idx: int) -> Tuple[np.ndarray, 
         return np.array([]), np.array([])
     return np.asarray(dists, dtype=float), np.asarray(times, dtype=float)
 
+
 def file_prefix_for_legend(path: str) -> str:
     """Legend name = substring before first '.' in basename."""
     base = os.path.basename(path)
     return base.split('.', 1)[0] if '.' in base else base
 
-def read_summary_value(results_path: str, model: str):
+
+def read_summary_value(results_path: str, model: str) -> Optional[float]:
     """
     Read the model-specific distance from '<results_path>.summary'.
     Returns float or None if not found/unreadable.
@@ -84,27 +97,58 @@ def read_summary_value(results_path: str, model: str):
         print(f"[warn] Failed reading {sum_path}: {e}", file=sys.stderr)
     return None
 
-# ----------------------------
-# KDE (no external deps)
-# ----------------------------
-def silverman_bandwidth(x: np.ndarray) -> float:
-    x = np.asarray(x, dtype=float)
-    n = x.size
-    if n < 2:
-        return 1.0
-    sd = np.std(x, ddof=1)
-    if sd == 0:
-        return max(1e-6, np.abs(x[0]) * 1e-3 + 1e-6)
-    return 1.06 * sd * (n ** (-1 / 5))
 
-def kde_gaussian(x: np.ndarray, grid: np.ndarray, bandwidth: float) -> np.ndarray:
-    if x.size == 0:
-        return np.zeros_like(grid)
-    h = max(bandwidth, 1e-12)
-    z = (grid[:, None] - x[None, :]) / h
-    K = np.exp(-0.5 * z ** 2) / np.sqrt(2 * np.pi)
-    dens = K.sum(axis=1) / (x.size * h)
-    return dens
+# ----------------------------
+# Auto bin calculation
+# ----------------------------
+def auto_bin_count(data: np.ndarray, xmin: float, xmax: float) -> int:
+    """
+    Compute bin count using a tightened Freedman-Diaconis rule, tuned
+    for right-skewed genomic distance data.
+
+        bin_width = 0.75 * IQR * n^(-1/3)
+
+    The standard FD multiplier (2.0) produces overly coarse bins for
+    skewed distributions where detail near the mode matters.  The 0.75
+    multiplier gives roughly 2.7× finer resolution while still being
+    data-adaptive (IQR-based, robust to outliers).
+
+    Falls back to Sturges' rule (1 + log2(n)) if IQR is zero (e.g. many
+    identical values), and clamps the result to [10, 500].
+
+    Parameters
+    ----------
+    data : concatenated distance values across all input series
+    xmin, xmax : the plot range (used to convert width -> count)
+
+    Returns
+    -------
+    int : number of bins
+    """
+    n = data.size
+    if n < 2:
+        return 10
+
+    q75, q25 = np.percentile(data, [75, 25])
+    iqr = q75 - q25
+    span = xmax - xmin
+    if span <= 0:
+        return 10
+
+    if iqr > 0:
+        # Tightened Freedman-Diaconis
+        bin_width = 1.0 * iqr * (n ** (-1.0 / 3.0))
+        # bin_width = 0.75 * iqr * (n ** (-1.0 / 3.0)) I adjust to slightly larger bins with 1.0
+        nbins = max(1, int(np.ceil(span / bin_width)))
+    else:
+        # Fallback: Sturges
+        nbins = max(1, int(np.ceil(1.0 + np.log2(n))))
+
+    # Clamp to a sensible range
+    nbins = max(10, min(nbins, 500))
+
+    return nbins
+
 
 # ----------------------------
 # Axis mapping: distance <-> time (MYA)
@@ -137,25 +181,102 @@ def compute_axis_mapping_mya(all_dists: np.ndarray, all_times_years: np.ndarray)
 
     return forward, inverse
 
+
 # ----------------------------
-# Peak finding (simple, no scipy)
+# Smoothing & peak finding
 # ----------------------------
-def find_top_peaks(xgrid: np.ndarray, y: np.ndarray, k: int) -> List[Tuple[float, float, int]]:
+def moving_average(y: np.ndarray, window: int) -> np.ndarray:
     """
-    Return up to k peaks as (x_peak, y_peak, idx) sorted by descending height.
-    A peak is y[i-1] < y[i] > y[i+1]. Ties resolved by height.
+    Centred moving average.  Window is forced to an odd number >= 1.
+    Edge bins use a smaller (truncated) window so output length = input length.
     """
-    if y.size < 3:
-        return []
-    peaks = []
-    for i in range(1, len(y) - 1):
-        if y[i] > y[i-1] and y[i] > y[i+1]:
-            peaks.append((xgrid[i], y[i], i))
-    if not peaks:
-        j = int(np.argmax(y))
-        return [(xgrid[j], y[j], j)]
-    peaks.sort(key=lambda tup: tup[1], reverse=True)
-    return peaks[:max(1, k)]
+    w = max(1, window)
+    if w % 2 == 0:
+        w += 1  # force odd for symmetric centring
+    if w == 1 or y.size <= 1:
+        return y.copy()
+    half = w // 2
+    out = np.empty_like(y, dtype=float)
+    for i in range(len(y)):
+        lo = max(0, i - half)
+        hi = min(len(y), i + half + 1)
+        out[i] = y[lo:hi].mean()
+    return out
+
+
+def compute_prominence(y: np.ndarray, idx: int) -> float:
+    """
+    Prominence of a peak at index `idx`:
+      Walk left until a higher value or the edge -> track the min along the way.
+      Walk right until a higher value or the edge -> track the min along the way.
+      prominence = y[idx] - max(left_min, right_min)
+    """
+    h = y[idx]
+    # Walk left
+    left_min = h
+    for j in range(idx - 1, -1, -1):
+        if y[j] > h:
+            break
+        left_min = min(left_min, y[j])
+    else:
+        left_min = min(left_min, y[0])
+    # Walk right
+    right_min = h
+    for j in range(idx + 1, len(y)):
+        if y[j] > h:
+            break
+        right_min = min(right_min, y[j])
+    else:
+        right_min = min(right_min, y[-1])
+    return h - max(left_min, right_min)
+
+
+def find_histogram_peaks(
+    bin_centers: np.ndarray,
+    bin_heights: np.ndarray,
+    k: int,
+    smooth_window: int = 3,
+    min_prominence: float = 0.0,
+) -> List[Tuple[float, float, int]]:
+    """
+    Find up to `k` peaks from histogram bin heights.
+
+    1. Smooth bin heights with a centred moving average of width `smooth_window`.
+    2. Identify local maxima (higher than both neighbours) on the smoothed curve.
+    3. Discard peaks whose prominence (on the smoothed curve) is below
+       `min_prominence`.  0 means keep all local maxima.
+    4. Return top k by prominence as (bin_center, raw_height, index),
+       sorted by descending prominence.
+
+    Peak *positions* (bin centres) and reported *heights* always come from the
+    original (unsmoothed) histogram so they faithfully represent the data.
+    """
+    if bin_heights.size < 3:
+        if bin_heights.size == 0:
+            return []
+        j = int(np.argmax(bin_heights))
+        return [(bin_centers[j], bin_heights[j], j)]
+
+    sm = moving_average(bin_heights, smooth_window)
+
+    # Local maxima on the smoothed curve
+    candidates = []
+    for i in range(1, len(sm) - 1):
+        if sm[i] > sm[i - 1] and sm[i] > sm[i + 1]:
+            prom = compute_prominence(sm, i)
+            if prom >= min_prominence:
+                candidates.append((bin_centers[i], bin_heights[i], i, prom))
+
+    if not candidates:
+        # Fallback: report the global maximum of the raw histogram
+        j = int(np.argmax(bin_heights))
+        return [(bin_centers[j], bin_heights[j], j)]
+
+    # Sort by prominence (primary) then height (secondary), descending
+    candidates.sort(key=lambda c: (c[3], c[1]), reverse=True)
+
+    return [(c[0], c[1], c[2]) for c in candidates[:max(1, k)]]
+
 
 # ----------------------------
 # Plotting
@@ -166,15 +287,14 @@ def plot_density(
     miu_str: str,
     out_pdf: str,
     xmax_override: float = None,
-    label_peaks: int = 0,          # 0 = off, >0 = number of peaks to mark
-    label_summary: bool = False,   # mark vline at model-specific summary value
-    no_legend: bool = False,       # suppress legend entirely
-    bins: int = 50,                # number of bins for histogram (0 disables)
+    label_peaks: int = 0,
+    label_summary: bool = False,
+    no_legend: bool = False,
+    bins_arg: Union[int, str] = 50,   # int or "auto"
+    smooth_window: int = 3,
+    min_prominence: float = 0.0,
 ):
     dist_idx, time_idx = MODEL_COLS[model]
-
-    # bins <= 0 means "no histograms"
-    plot_bins = bins is not None and bins > 0
 
     series: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
     all_dists = []
@@ -196,61 +316,62 @@ def plot_density(
     all_dists_cat = np.concatenate(all_dists)
     all_times_cat = np.concatenate(all_times_years)
 
-    # Build global grid across all datasets for consistent comparison
+    # X-axis range
     xmin = float(np.min(all_dists_cat))
     xmax = float(np.max(all_dists_cat))
 
-    # Apply optional x-max override (distance axis)
     if xmax_override is not None:
         if xmax_override <= xmin:
             raise SystemExit(f"--xmax ({xmax_override}) must be greater than data min ({xmin}).")
         xmax = float(xmax_override)
 
-    # Small padding
     if xmin == xmax:
         xmax = xmin + 1e-9
     xpad = 0.02 * (xmax - xmin) if xmax > xmin else 0.01
     xmin_plot = xmin - xpad
     xmax_plot = xmax + xpad
 
-    xgrid = np.linspace(xmin_plot, xmax_plot, 800)
+    # Resolve bin count — "auto" uses Freedman-Diaconis on all data combined
+    if isinstance(bins_arg, str) and bins_arg.lower() == "auto":
+        bins = auto_bin_count(all_dists_cat, xmin_plot, xmax_plot)
+        print(f"[info] Auto bins (tightened Freedman-Diaconis): {bins}", file=sys.stderr)
+    else:
+        bins = int(bins_arg)
 
-    # Compute densities and draw curves
+    # Time mapping (must be built before peak labelling)
+    forward, inverse = compute_axis_mapping_mya(all_dists_cat, all_times_cat)
+
+    # ------- Figure -------
     plt.figure(figsize=(8.8, 5.8))
     ax = plt.gca()
 
-    # Track series metadata for legend assembly
-    per_series = {}  # path -> dict(color, label, peak_xs (list), summary (float|None), sort_key)
+    per_series: Dict[str, dict] = {}
 
     for path, (d, _t) in series.items():
-        bw = silverman_bandwidth(d)
-        dens = kde_gaussian(d, xgrid, bw)
+        # Draw histogram — all series use the same bins/range
+        heights, edges, patches = ax.hist(
+            d,
+            bins=bins,
+            density=True,
+            range=(xmin_plot, xmax_plot),
+            alpha=0.45,
+            edgecolor="white",
+            linewidth=0.4,
+            label=file_prefix_for_legend(path),
+        )
+        color = patches[0].get_facecolor()
 
-        # First draw the KDE line (primary output)
-        line, = ax.plot(xgrid, dens, linewidth=2, label=file_prefix_for_legend(path))
-        color = line.get_color()
-
-        # Then (optionally) overlay a mostly transparent histogram
-        # using the same color, behind the KDE line.
-        if plot_bins:
-            ax.hist(
-                d,
-                bins=bins,
-                density=True,
-                range=(xmin_plot, xmax_plot),
-                color=color,
-                alpha=0.2,        # mostly transparent
-                edgecolor='none',
-                zorder=0,         # behind the KDE line
-            )
+        bin_centers = 0.5 * (edges[:-1] + edges[1:])
 
         per_series[path] = {
             "color": color,
             "label": file_prefix_for_legend(path),
+            "bin_centers": bin_centers,
+            "bin_heights": heights,
             "peak_xs": [],
+            "peak_myas": [],
             "summary": None,
             "sort_key": None,
-            "dens": dens  # keep to find peaks
         }
 
     ax.set_xlim(xmin_plot, xmax_plot)
@@ -258,149 +379,202 @@ def plot_density(
     ax.set_xlabel(f"Genetic distance ({model})")
 
     # Secondary X-axis (time in MYA)
-    forward, inverse = compute_axis_mapping_mya(all_dists_cat, all_times_cat)
     secax = ax.secondary_xaxis('top', functions=(forward, inverse))
     secax.set_xlabel("Time (MYA)")
 
-    # Title with μ
+    # Title
     plt.title(f"Density of {model} divergence (μ = {miu_str})")
 
-    # Summary-based vlines per series
+    # Summary vlines
     if label_summary:
-        for path in per_series.keys():
+        for path in per_series:
             v = read_summary_value(path, model)
             if v is None:
                 continue
-            ax.axvline(x=v, linestyle="--", linewidth=1.5, color=per_series[path]["color"], alpha=0.85)
+            ax.axvline(x=v, linestyle="--", linewidth=1.5,
+                       color=per_series[path]["color"], alpha=0.85)
             per_series[path]["summary"] = v
 
-    # Peak-based vlines and capture peak positions
+    # Peak detection and vlines
     if label_peaks and label_peaks > 0:
         for path, meta in per_series.items():
-            dens = meta["dens"]
-            peaks = find_top_peaks(xgrid, dens, k=label_peaks)
+            peaks = find_histogram_peaks(
+                meta["bin_centers"],
+                meta["bin_heights"],
+                k=label_peaks,
+                smooth_window=smooth_window,
+                min_prominence=min_prominence,
+            )
             if not peaks:
                 continue
-            # sort peaks by x for prettier legend text
-            peaks_sorted_by_x = sorted(peaks, key=lambda p: p[0])
-            xs = [xp for (xp, _yp, _idx) in peaks_sorted_by_x]
-            for xp in xs:
-                ax.axvline(x=xp, linestyle="--", linewidth=1, color=meta["color"], alpha=0.8)
-            meta["peak_xs"] = xs
-            # sort key = tallest peak's x (find_top_peaks returns peaks sorted by height desc)
-            meta["sort_key"] = peaks[0][0]
+            # Sort by x for legend readability
+            peaks_sorted = sorted(peaks, key=lambda p: p[0])
+            xs = [xp for xp, _h, _i in peaks_sorted]
+            myas = [float(forward(np.array([xp]))[0]) for xp in xs]
 
-    # ----------------------------
-    # Legend construction
-    # ----------------------------
+            for xp in xs:
+                ax.axvline(x=xp, linestyle="--", linewidth=1.2,
+                           color=meta["color"], alpha=0.8)
+
+            meta["peak_xs"] = xs
+            meta["peak_myas"] = myas
+            tallest_x = peaks[0][0]
+            meta["sort_key"] = tallest_x
+
+    # ------- Legend -------
     if not no_legend:
-        any_values = any((meta["peak_xs"] or (meta["summary"] is not None)) for meta in per_series.values())
+        any_values = any(
+            meta["peak_xs"] or (meta["summary"] is not None)
+            for meta in per_series.values()
+        )
         if any_values:
-            # If any peaks exist, sort by tallest-peak x; else if only summaries, sort by summary.
             if any(meta["peak_xs"] for meta in per_series.values()):
-                sort_items = sorted(per_series.values(), key=lambda m: (float('inf') if m["sort_key"] is None else m["sort_key"]))
+                sort_items = sorted(
+                    per_series.values(),
+                    key=lambda m: m["sort_key"] if m["sort_key"] is not None else float('inf'),
+                )
             else:
-                sort_items = sorted(per_series.values(), key=lambda m: (float('inf') if m["summary"] is None else m["summary"]))
+                sort_items = sorted(
+                    per_series.values(),
+                    key=lambda m: m["summary"] if m["summary"] is not None else float('inf'),
+                )
+
             handles = []
             texts = []
             for meta in sort_items:
                 color = meta["color"]
                 label = meta["label"]
-                peaks_text = ""
-                summary_text = ""
-                if meta["peak_xs"]:
-                    peaks_text = ", ".join(f"{x:.4f}" for x in meta["peak_xs"])
-                if meta["summary"] is not None:
-                    summary_text = f"{meta['summary']:.4f}"
+                peaks_str = ""
+                summary_str = ""
 
-                # Compose legend line based on available parts:
-                if meta["peak_xs"] and (meta["summary"] is not None):
-                    # both present
-                    text = f"{label} - {peaks_text}; summary: {summary_text}"
+                if meta["peak_xs"]:
+                    parts = []
+                    for xp, mya in zip(meta["peak_xs"], meta["peak_myas"]):
+                        parts.append(f"{xp:.4f} ({mya:.3f} MYA)")
+                    peaks_str = ", ".join(parts)
+
+                if meta["summary"] is not None:
+                    summary_mya = float(forward(np.array([meta["summary"]]))[0])
+                    summary_str = f"{meta['summary']:.4f} ({summary_mya:.3f} MYA)"
+
+                if meta["peak_xs"] and meta["summary"] is not None:
+                    text = f"{label} - {peaks_str}; summary: {summary_str}"
                 elif meta["peak_xs"]:
-                    text = f"{label} - {peaks_text}"
+                    text = f"{label} - {peaks_str}"
                 elif meta["summary"] is not None:
-                    text = f"{label} - {summary_text}"
+                    text = f"{label} - {summary_str}"
                 else:
-                    text = label  # fallback (shouldn't happen if any_values is True)
+                    text = label
 
                 handles.append(Line2D([0], [0], color=color, lw=2))
                 texts.append(text)
 
             ax.legend(handles=handles, labels=texts, loc="upper right", frameon=True)
         else:
-            # Default legend = series names
             ax.legend(loc="upper right", frameon=True)
-
-    # Cleanup: drop stored densities to avoid accidental reuse
-    for meta in per_series.values():
-        meta.pop("dens", None)
 
     plt.tight_layout()
     plt.savefig(out_pdf, format="pdf")
     plt.close()
     print(f"[ok] Wrote {out_pdf}")
 
+
 # ----------------------------
 # CLI
 # ----------------------------
+def parse_bins(value: str) -> Union[int, str]:
+    """Accept 'auto' or a positive integer for --bins."""
+    if value.lower() == "auto":
+        return "auto"
+    try:
+        n = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"--bins must be 'auto' or a positive integer, got '{value}'"
+        )
+    if n < 1:
+        raise argparse.ArgumentTypeError("--bins must be >= 1")
+    return n
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Plot density of LTR-RT divergence (distance bottom X-axis, time top X-axis in MYA)."
+        description="Plot histogram density of LTR-RT divergence "
+                    "(distance bottom X-axis, time top X-axis in MYA)."
     )
     parser.add_argument(
         "-in", dest="inputs", nargs="+", required=True,
-        help="One or more TSV files like '<prefix>.LTRs.alns.results'."
+        help="One or more TSV files like '<prefix>.LTRs.alns.results'.",
     )
     parser.add_argument(
         "-model", choices=["K2P", "JC69", "p"], default="K2P",
-        help="Distance/time model to use for axes. Default: K2P."
+        help="Distance/time model to use for axes. Default: K2P.",
     )
     parser.add_argument(
         "-miu", default="(not specified)",
-        help="Mutation rate (string). Used in the figure title only. Example: 3e-8"
+        help="Mutation rate (string). Used in the figure title only. Example: 3e-8",
     )
     parser.add_argument(
         "-out", default=None,
-        help="Output PDF filename (optional). Default: density_<MODEL>.pdf"
+        help="Output PDF filename (optional). Default: density_<MODEL>.pdf",
     )
     parser.add_argument(
         "--xmax", type=float, default=None,
-        help="Custom max for the distance X-axis (bottom). Must be greater than the observed min."
+        help="Custom max for the distance X-axis (bottom). Must be > observed min.",
     )
     parser.add_argument(
         "--label-peaks", nargs="?", const="1", default="0",
-        help=("Mark top N peaks per curve with vertical dashed lines, and put peak values in the legend "
-              "(sorted ascending by the tallest peak). Default N=1 when flag present. "
-              "If omitted, no peak markers.")
+        help=("Mark top N peaks per curve with vertical dashed lines and include "
+              "peak distance + MYA in the legend. Default N=1 when flag present. "
+              "If omitted, no peak markers."),
     )
     parser.add_argument(
         "--label-summary", action="store_true",
-        help=("Draw a vertical dashed line per input at the model-specific value read from "
-              "'<input>.summary' (keys: raw_d, JC69_d, K2P_d), and include that value in the legend.")
+        help=("Draw a vertical dashed line per input at the model-specific value "
+              "read from '<input>.summary' (keys: raw_d, JC69_d, K2P_d), and "
+              "include that value in the legend."),
     )
     parser.add_argument(
         "--no-legend", action="store_true",
-        help="Suppress the legend entirely (vlines will still be shown if requested)."
+        help="Suppress the legend entirely (vlines still shown if requested).",
     )
     parser.add_argument(
-        "--bins", type=int, default=50,
-        help=("Number of bins for per-series histograms (density scale). "
-              "Use 0 to disable histograms. Default: 50.")
+        "--bins", type=parse_bins, default=50,
+        help=("Number of histogram bins, or 'auto' to select automatically "
+              "using the Freedman-Diaconis rule (robust for skewed data). "
+              "When 'auto', bin width is computed from ALL input data combined "
+              "so every series shares the same bin edges. Default: 50."),
+    )
+    parser.add_argument(
+        "--smooth", type=int, default=3,
+        help=("Moving-average window (in bins) used to smooth histogram heights "
+              "ONLY for peak detection. Must be >= 1. Does NOT change the plotted "
+              "histogram — only affects which bin is identified as a peak. "
+              "Use 1 for no smoothing (raw bin heights). Default: 3."),
+    )
+    parser.add_argument(
+        "--min-prominence", type=float, default=0.0,
+        help=("Minimum prominence a peak must have to be reported. "
+              "Prominence = how far a peak rises above the highest saddle "
+              "connecting it to a taller peak. Filters out noise peaks. "
+              "Use 0 to accept all local maxima (after smoothing). Default: 0."),
     )
 
     args = parser.parse_args()
     out_pdf = args.out if args.out else f"density_{args.model}.pdf"
 
-    # parse label-peaks value
     try:
         label_peaks = int(args.label_peaks)
     except ValueError:
-        print("[error] --label-peaks must be an integer if provided with a value.", file=sys.stderr)
+        print("[error] --label-peaks must be an integer.", file=sys.stderr)
         sys.exit(1)
 
-    if args.bins < 0:
-        print("[error] --bins must be >= 0.", file=sys.stderr)
+    if args.smooth < 1:
+        print("[error] --smooth must be >= 1.", file=sys.stderr)
+        sys.exit(1)
+
+    if args.min_prominence < 0:
+        print("[error] --min-prominence must be >= 0.", file=sys.stderr)
         sys.exit(1)
 
     try:
@@ -413,11 +587,14 @@ def main():
             label_peaks=label_peaks,
             label_summary=args.label_summary,
             no_legend=args.no_legend,
-            bins=args.bins,
+            bins_arg=args.bins,
+            smooth_window=args.smooth,
+            min_prominence=args.min_prominence,
         )
     except Exception as e:
         print(f"[error] {e}", file=sys.stderr)
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()
