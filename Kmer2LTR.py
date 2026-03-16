@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 import math
+from collections import namedtuple
 from multiprocessing import Pool
 from pathlib import Path
 import re
@@ -288,6 +289,110 @@ def split_fasta(input_fasta, temp_dir):
                     current_out.write(line)
         if current_out:
             current_out.close()
+
+
+FastaEntry = namedtuple("FastaEntry", ["safe_name", "header_token", "file_offset", "length_bytes", "is_duplicate"])
+
+
+def index_fasta(input_fasta, temp_dir):
+    """
+    Scan the input FASTA in a single pass WITHOUT writing any seq.fa files.
+
+    Returns:
+        entries: list[FastaEntry] — one per sequence, recording file offset/length
+                 so each sequence can be materialized later via write_batch().
+
+    Side effects:
+        Writes header_map.tsv into temp_dir (needed for --reuse-existing filtering).
+    """
+    temp_dir = Path(temp_dir)
+    map_path = temp_dir / "header_map.tsv"
+    counts = {}       # header_token -> occurrence count
+    entries = []
+    dup_tokens = set() # tokens that appear more than once
+
+    with open(input_fasta, "rb") as infile, open(map_path, "w") as map_out:
+        current_offset = None
+        current_safe = None
+        current_token = None
+
+        for line in infile:
+            if line.startswith(b">"):
+                # Finalize previous entry
+                if current_offset is not None:
+                    length = infile.tell() - len(line) - current_offset
+                    entries.append(FastaEntry(
+                        safe_name=current_safe,
+                        header_token=current_token,
+                        file_offset=current_offset,
+                        length_bytes=length,
+                        is_duplicate=False,  # placeholder, resolved below
+                    ))
+
+                header_line = line[1:].strip().decode("utf-8", errors="replace")
+                header_token = header_line.split()[0] if header_line else ""
+                counts[header_token] = counts.get(header_token, 0) + 1
+
+                base_safe = sanitize_name(header_token)
+                if counts[header_token] == 1:
+                    safe = base_safe
+                else:
+                    safe = f"{base_safe}__dup{counts[header_token]}"
+
+                if counts[header_token] == 2:
+                    dup_tokens.add(header_token)
+
+                map_out.write(f"{safe}\t{header_token}\n")
+
+                current_offset = infile.tell() - len(line)
+                current_safe = safe
+                current_token = header_token
+
+        # Finalize the last entry
+        if current_offset is not None:
+            length = infile.tell() - current_offset
+            entries.append(FastaEntry(
+                safe_name=current_safe,
+                header_token=current_token,
+                file_offset=current_offset,
+                length_bytes=length,
+                is_duplicate=False,
+            ))
+
+    # Mark duplicate entries
+    if dup_tokens:
+        entries = [
+            e._replace(is_duplicate=True) if e.header_token in dup_tokens else e
+            for e in entries
+        ]
+
+    return entries
+
+
+def write_batch(entries, input_fasta, temp_dir):
+    """
+    Given a slice of FastaEntry items, seek into the source FASTA and write
+    each entry's seq.fa into its temp subdir. Also creates DUPLICATE_NAME
+    marker files where needed.
+    """
+    temp_dir = Path(temp_dir)
+    with open(input_fasta, "rb") as fh:
+        for entry in entries:
+            dir_path = temp_dir / entry.safe_name
+            dir_path.mkdir(parents=True, exist_ok=True)
+
+            # Write seq.fa
+            fh.seek(entry.file_offset)
+            data = fh.read(entry.length_bytes)
+            with open(dir_path / "seq.fa", "wb") as out:
+                out.write(data)
+
+            # Write DUPLICATE_NAME marker if needed
+            if entry.is_duplicate:
+                try:
+                    (dir_path / "DUPLICATE_NAME").write_text("")
+                except Exception:
+                    pass
 
 
 def read_seq_string(seq_fa: Path) -> str:
@@ -726,6 +831,22 @@ def domains_prefix(path_like: str) -> str:
     return re.sub(r'_domains$', '', stem)
 
 
+def _progress_update(completed, total, start, last_update, update_interval):
+    """Print a progress update to stderr if enough time has elapsed. Returns new last_update."""
+    now = time.monotonic()
+    if (now - last_update) >= update_interval or completed == total:
+        elapsed = now - start
+        pct = (completed / total) * 100 if total else 100.0
+        rate = (completed / elapsed) if elapsed > 0 else 0.0
+        remaining = ((total - completed) / rate) if rate > 0 else float("inf")
+        eta_text = _format_hms(remaining)
+        msg = (f"\rProcessing {completed}/{total}. "
+               f"{pct:.2f}% complete. Estimated time remaining {eta_text}")
+        print(msg, end="", file=sys.stderr, flush=True)
+        return now
+    return last_update
+
+
 def process_one_input(args_base: argparse.Namespace, in_fasta: str, per_prefix_domains: dict, multi_mode: bool):
     """Process a single input FASTA using (possibly) matched domains mapping in multi-input mode."""
     global ARGS, DOMAINS, LOGFILE
@@ -762,80 +883,12 @@ def process_one_input(args_base: argparse.Namespace, in_fasta: str, per_prefix_d
     with open(log_path, "w") as _lf:
         _lf.write("")  # truncate
 
-    # Split FASTA into separate seq.fa files (safe/unique dir names; original headers preserved)
-    split_fasta(ARGS.input_fasta, ARGS.temp_dir)
+    use_batching = args_base.purge_subdirs
 
-    # Map sanitized dir -> original header token (from header_map.tsv)
-    header_map = {}
-    try:
-        with open(Path(ARGS.temp_dir) / "header_map.tsv") as hm:
-            for line in hm:
-                s = line.strip()
-                if not s:
-                    continue
-                safe, token = s.split("\t", 1)
-                header_map[safe] = token
-    except FileNotFoundError:
-        header_map = {}
-
-    # Discover sequence directories
-    dirs = [p for p in Path(ARGS.temp_dir).iterdir() if p.is_dir()]
-
-    # --- NEW: filter to only missing IDs if reusing ---
-    if args_base.reuse_existing:
-        already = read_existing_ids(outfile)
-        # keep only dirs whose original header token is not yet in results
-        def needs_run(p: Path) -> bool:
-            token = header_map.get(p.name)
-            if token is None:
-                # Fallback: read the header token directly from seq.fa
-                try:
-                    with open(p / "seq.fa") as fh:
-                        first = next((ln for ln in fh if ln.startswith(">")), None)
-                    token = first[1:].strip().split()[0] if first else p.name
-                except Exception:
-                    token = p.name
-            return token not in already
-
-        dirs = [str(p) for p in dirs if needs_run(p)]
-        if args_base.verbose:
-            print(f"[REUSE] {len(already)} already in {outfile}; {len(dirs)} remaining to process.")
+    if use_batching:
+        _process_batched(ARGS, DOMAINS, log_path, in_fasta, pref)
     else:
-        dirs = [str(p) for p in dirs]
-
-    # Process in parallel with live progress/ETA (single updating line on stderr)
-    total = len(dirs)
-    start = time.monotonic()
-    last_update = 0.0  # throttle screen updates
-    update_interval = 0.25  # seconds between redraws (tweak as desired)
-
-    # We iterate results so we can update the counter as work completes
-    completed = 0
-    print("", file=sys.stderr)  # ensure stderr stream exists
-
-    with Pool(
-        processes=ARGS.threads,
-        initializer=_pool_init,
-        initargs=(ARGS, DOMAINS, log_path),
-    ) as pool:
-        for _ in pool.imap_unordered(process_dir, dirs, chunksize=1):
-            completed += 1
-            now = time.monotonic()
-            if (now - last_update) >= update_interval or completed == total:
-                elapsed = now - start
-                pct = (completed / total) * 100 if total else 100.0
-                rate = (completed / elapsed) if elapsed > 0 else 0.0
-                remaining = ((total - completed) / rate) if rate > 0 else float("inf")
-                eta_text = _format_hms(remaining)
-
-                # Carriage return to redraw the same line; no newline
-                msg = (f"\rProcessing {completed}/{total}. "
-                    f"{pct:.2f}% complete. Estimated time remaining {eta_text}")
-                print(msg, end="", file=sys.stderr, flush=True)
-                last_update = now
-
-    # finish the progress line with a newline
-    print("", file=sys.stderr)
+        _process_unbatched(ARGS, DOMAINS, log_path, in_fasta, pref)
 
     write_summary(ARGS.outfile)
 
@@ -848,8 +901,118 @@ def process_one_input(args_base: argparse.Namespace, in_fasta: str, per_prefix_d
 
     print(f"All sequences processed for {pref}. Output in {ARGS.outfile}")
 
-#    if LOGFILE:
-#        LOGFILE.close()
+
+def _process_unbatched(args, domains, log_path, in_fasta, pref):
+    """Original flow: split all sequences upfront, then process all at once."""
+    # Split FASTA into separate seq.fa files
+    split_fasta(args.input_fasta, args.temp_dir)
+
+    # Map sanitized dir -> original header token
+    header_map = _read_header_map(args.temp_dir)
+
+    # Discover sequence directories
+    dirs = [p for p in Path(args.temp_dir).iterdir() if p.is_dir()]
+
+    # Filter to only missing IDs if reusing
+    if args.reuse_existing:
+        already = read_existing_ids(args.outfile)
+        def needs_run(p: Path) -> bool:
+            token = header_map.get(p.name)
+            if token is None:
+                try:
+                    with open(p / "seq.fa") as fh:
+                        first = next((ln for ln in fh if ln.startswith(">")), None)
+                    token = first[1:].strip().split()[0] if first else p.name
+                except Exception:
+                    token = p.name
+            return token not in already
+
+        dirs = [str(p) for p in dirs if needs_run(p)]
+        if args.verbose:
+            print(f"[REUSE] {len(already)} already in {args.outfile}; {len(dirs)} remaining to process.")
+    else:
+        dirs = [str(p) for p in dirs]
+
+    total = len(dirs)
+    start = time.monotonic()
+    last_update = 0.0
+    update_interval = 0.25
+    completed = 0
+    print("", file=sys.stderr)
+
+    with Pool(
+        processes=args.threads,
+        initializer=_pool_init,
+        initargs=(args, domains, log_path),
+    ) as pool:
+        for _ in pool.imap_unordered(process_dir, dirs, chunksize=1):
+            completed += 1
+            last_update = _progress_update(completed, total, start, last_update, update_interval)
+
+    print("", file=sys.stderr)
+
+
+def _process_batched(args, domains, log_path, in_fasta, pref):
+    """
+    Batched flow: index the FASTA without writing seq.fa files,
+    then materialize and process one batch at a time.
+    """
+    batch_size = args.batch_size
+
+    # Step 1: Index — scan only, no files written (except header_map.tsv)
+    entries = index_fasta(args.input_fasta, args.temp_dir)
+
+    # Step 2: Filter for reuse
+    if args.reuse_existing:
+        already = read_existing_ids(args.outfile)
+        entries = [e for e in entries if e.header_token not in already]
+        if args.verbose:
+            print(f"[REUSE] {len(already)} already in {args.outfile}; {len(entries)} remaining to process.")
+
+    total = len(entries)
+    start = time.monotonic()
+    last_update = 0.0
+    update_interval = 0.25
+    completed = 0
+    print("", file=sys.stderr)
+
+    # Create pool once, reuse across all batches
+    with Pool(
+        processes=args.threads,
+        initializer=_pool_init,
+        initargs=(args, domains, log_path),
+    ) as pool:
+        # Process in batches
+        for batch_start in range(0, total, batch_size):
+            batch = entries[batch_start:batch_start + batch_size]
+
+            # Step 3a: Write only this batch's seq.fa files
+            write_batch(batch, args.input_fasta, args.temp_dir)
+
+            # Step 3b: Process this batch
+            batch_dirs = [str(Path(args.temp_dir) / e.safe_name) for e in batch]
+            for _ in pool.imap_unordered(process_dir, batch_dirs, chunksize=1):
+                completed += 1
+                last_update = _progress_update(completed, total, start, last_update, update_interval)
+            # purge_subdirs is active, so process_dir already removed each subdir
+
+    print("", file=sys.stderr)
+
+
+def _read_header_map(temp_dir):
+    """Read header_map.tsv: sanitized_name -> original_header_token."""
+    header_map = {}
+    try:
+        with open(Path(temp_dir) / "header_map.tsv") as hm:
+            for line in hm:
+                s = line.strip()
+                if not s:
+                    continue
+                safe, token = s.split("\t", 1)
+                header_map[safe] = token
+    except FileNotFoundError:
+        pass
+    return header_map
 
 
 if __name__ == "__main__":
@@ -871,6 +1034,14 @@ if __name__ == "__main__":
             "After each sequence directory finishes processing (including skips/errors), "
             "delete its temp subdirectory to keep file counts low. "
             "Mutually exclusive with -k/--keep_temp."
+        )
+    )
+    parser.add_argument(
+        "--batch-size", type=int, default=100, dest="batch_size",
+        help=(
+            "When --purge-subdirs is active, only materialize this many seq.fa files "
+            "at a time to limit temp file count. Default: 100. "
+            "Ignored when --purge-subdirs is not set."
         )
     )
     parser.add_argument(
