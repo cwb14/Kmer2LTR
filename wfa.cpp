@@ -166,6 +166,7 @@ struct ReliableBounds {
     // Alignment-column coordinates (including gaps) in [start_col, end_col_excl)
     size_t start_col = 0;
     size_t end_col_excl = 0;
+    size_t total_cols = 0;   // total alignment columns
     bool   enabled = false;
     bool   found = false;
 };
@@ -219,6 +220,7 @@ static ReliableBounds find_reliable_bounds_k(const string& cigar,
 
     const size_t aln_cols = compute_alignment_cols();
     rb.end_col_excl = aln_cols;
+    rb.total_cols = aln_cols;
 
     if (!rb.enabled) {
         rb.found = true;
@@ -653,6 +655,15 @@ int main(int argc, char** argv) {
          << JC69_T   << "\t"
          << (std::isfinite(K2P_d)  ? K2P_d  : NAN) << "\t"
          << K2P_T;
+
+    // Trim columns: alignment columns in unreliable region at each end.
+    // left_trim  → 5' LTR outer boundary over-extension (start of alignment)
+    // right_trim → 3' LTR outer boundary over-extension (end of alignment)
+    {
+        size_t left_trim  = (rb.enabled && rb.found) ? rb.start_col : 0;
+        size_t right_trim = (rb.enabled && rb.found) ? (rb.total_cols - rb.end_col_excl) : 0;
+        cout << "\t" << left_trim << "\t" << right_trim;
+    }
 
     if (W > 0) {
         cout << "\t" << win_n
