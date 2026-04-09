@@ -116,8 +116,27 @@ def sum_ungapped_bp(fasta_path: Path) -> int:
                 continue
             s = line.strip()
             # count all non-gap characters
-            total += sum(1 for c in s if c != "-")
+            total += len(s) - s.count("-")
     return total
+
+
+def _read_aln_stats(aln_fa: Path):
+    """Read proposed LTR length from header and count ungapped bp in one pass."""
+    proposed_len = None
+    total_bp = 0
+    with open(aln_fa) as fh:
+        for line in fh:
+            if line.startswith(">"):
+                if proposed_len is None:
+                    m = re.search(r"5p:1-(\d+)", line)
+                    if m:
+                        proposed_len = int(m.group(1))
+            else:
+                s = line.strip()
+                if s:
+                    total_bp += len(s) - s.count("-")
+    return proposed_len, total_bp
+
 
 def _format_hms(seconds: float) -> str:
     """Return 'Hh:Mm:Ss' for a nonnegative seconds value."""
@@ -524,7 +543,7 @@ def _discover_and_extract_ltrs(seq, kmin, kmax, dist, std_factor, extension):
     return (seq[0:new_end1], seq[new_start2 - 1:], new_end1, new_start2)
 
 
-def _run_wfa_and_filter(aln_clean, proposed_len, mutation_rate, max_win_overdisp, outfile, verbose):
+def _run_wfa_and_filter(aln_clean, proposed_len, mutation_rate, max_win_overdisp, verbose):
     """
     Run WFA on a trimmed alignment and post-process in Python.
     Replaces the shell pipeline: wfa | cut | sed | awk | awk | awk | awk.
@@ -581,9 +600,7 @@ def _run_wfa_and_filter(aln_clean, proposed_len, mutation_rate, max_win_overdisp
         kept = kept[:-3]
 
     # Insert proposed_len as second column
-    out_line = "\t".join([h1, str(proposed_len)] + kept) + "\n"
-    with open(outfile, "a") as ofile:
-        ofile.write(out_line)
+    return "\t".join([h1, str(proposed_len)] + kept) + "\n"
 
 
 def read_existing_ids(results_path: str) -> set[str]:
@@ -624,32 +641,34 @@ def parse_proposed_ltr_len_from_aln(aln_fa: Path) -> int | None:
     return None
 
 
-def try_fast_path(dir_path: Path, header_token: str, seq_len: int) -> bool:
+def try_fast_path(dir_path: Path, header_token: str, seq_len: int, seq: str) -> tuple[bool, str | None]:
     """
     Fast-path when domains TSV provides LTR length:
-      - Safety checks 
+      - Safety checks
       - Extract first/last min(ltr_len + extension, seq_len//2) bp
       - Write LTRs.fa
-      - Run MAFFT -> trimal -> WFA, then append to main outfile
+      - Run MAFFT -> trimal -> WFA, return result line
 
-    Returns True if fast-path executed (regardless of downstream success/exception),
-    False if we should run the full k-mer pipeline.
+    Returns (attempted, result_line):
+      (False, None)  if fast-path doesn't apply (fall back to full pipeline)
+      (True, None)   if fast-path ran but no result (filtered/skipped)
+      (True, str)    if fast-path produced a result line
     """
     global ARGS, DOMAINS
     if not DOMAINS:
-        return False
+        return (False, None)
 
     # Duplicate name? -> uncertain mapping -> full pipeline unless user overrides.
     if (dir_path / "DUPLICATE_NAME").exists() and not ARGS.assume_dup_same_ltr:
         if ARGS.verbose:
             print(f"[FAST-PATH SKIP] Duplicate header name detected for '{header_token}'. "
                   f"Use --assume-duplicate-same-ltr to override (risky).")
-        return False
+        return (False, None)
     # If ARGS.assume_dup_same_ltr is True, proceed assuming all duplicates with this
     # header token share the same LTR length from DOMAINS.
 
     if header_token not in DOMAINS:
-        return False
+        return (False, None)
 
     ltr_len = DOMAINS[header_token]
 
@@ -658,7 +677,7 @@ def try_fast_path(dir_path: Path, header_token: str, seq_len: int) -> bool:
         if ARGS.verbose:
             print(f"[FAST-PATH SKIP] Safety check failed for '{header_token}': "
                   f"seq_len={seq_len} <= 2*{ltr_len}+50")
-        return False
+        return (False, None)
 
     # Determine extraction length: min(ltr_len + extension, seq_len//2)
     ext_len = ltr_len + ARGS.extension
@@ -667,7 +686,6 @@ def try_fast_path(dir_path: Path, header_token: str, seq_len: int) -> bool:
         ext_len = cap
 
     # Perform direct extraction into LTRs.fa (not aln.clean)
-    seq = read_seq_string(dir_path / "seq.fa")
     five_p = seq[:ext_len]
     three_p = seq[-ext_len:]
 
@@ -705,7 +723,7 @@ def try_fast_path(dir_path: Path, header_token: str, seq_len: int) -> bool:
             (dir_path / "SKIPPED.missing_alignment").write_text(str(e))
         except Exception:
             pass
-        return True  # fast-path executed, even if skipped downstream
+        return (True, None)  # fast-path executed, even if skipped downstream
 
     threshold = ARGS.min_retained_fraction * raw_bp
     if (clean_bp + ARGS.extension) <= threshold:
@@ -721,17 +739,17 @@ def try_fast_path(dir_path: Path, header_token: str, seq_len: int) -> bool:
             )
         except Exception:
             pass
-        return True  # fast-path executed, but result skipped
+        return (True, None)  # fast-path executed, but result skipped
 
     # Fast-path: use DOMAINS_TSV value directly, do NOT subtract extension
     reported_len = ltr_len
 
-    _run_wfa_and_filter(
+    result = _run_wfa_and_filter(
         dir_path / "LTRs.aln.clean", reported_len,
-        ARGS.mutation_rate, ARGS.max_win_overdisp, ARGS.outfile, ARGS.verbose,
+        ARGS.mutation_rate, ARGS.max_win_overdisp, ARGS.verbose,
     )
 
-    return True
+    return (True, result)
 
 
 def process_dir(dir_path):
@@ -749,7 +767,6 @@ def process_dir(dir_path):
     try:
         args = ARGS
         verbose = args.verbose
-        out_file = args.outfile
         dist = args.dist
         kmin = args.kmin
         kmax = args.kmax
@@ -775,8 +792,9 @@ def process_dir(dir_path):
 
         # ===== FAST-PATH TRY =====
         try:
-            if try_fast_path(dir_path, header_token, seq_len):
-                return
+            attempted, result = try_fast_path(dir_path, header_token, seq_len, seq)
+            if attempted:
+                return result
         except Exception as e:
             print(f"[FAST-PATH ERROR] {header_token}: {e}. Falling back to full pipeline.")
 
@@ -813,8 +831,8 @@ def process_dir(dir_path):
 
         # ----- Short-circuit if trimmed alignment is too short vs raw alignment -----
         try:
-            raw_bp = sum_ungapped_bp(aln_fa)                 # from "LTRs.aln.fa"
-            clean_bp = sum_ungapped_bp(dir_path / "LTRs.aln.clean")  # from "LTRs.aln.clean"
+            proposed_len, raw_bp = _read_aln_stats(aln_fa)   # one pass over LTRs.aln.fa
+            clean_bp = sum_ungapped_bp(dir_path / "LTRs.aln.clean")
         except FileNotFoundError as e:
             print(f"[SKIP] Missing alignment file for {dir_path.name}: {e}")
             try:
@@ -841,8 +859,7 @@ def process_dir(dir_path):
                 pass
             return
 
-        # Compute proposed LTR len from LTRs.aln.fa headers and adjust by extension
-        proposed_len = parse_proposed_ltr_len_from_aln(aln_fa)
+        # Adjust proposed LTR len by extension
         if proposed_len is None:
             proposed_adj = 0
             if ARGS.verbose:
@@ -850,10 +867,10 @@ def process_dir(dir_path):
         else:
             proposed_adj = max(proposed_len - ARGS.extension, 0)
 
-        # Final WFA and append results
-        _run_wfa_and_filter(
+        # Final WFA
+        return _run_wfa_and_filter(
             dir_path / "LTRs.aln.clean", proposed_adj,
-            args.mutation_rate, args.max_win_overdisp, out_file, verbose,
+            args.mutation_rate, args.max_win_overdisp, verbose,
         )
 
     finally:
@@ -1054,12 +1071,15 @@ def _process_unbatched(args, domains, log_path, in_fasta, pref):
     completed = 0
     print("", file=sys.stderr)
 
-    with Pool(
+    with open(args.outfile, "a") as outfh, Pool(
         processes=args.threads,
         initializer=_pool_init,
         initargs=(args, domains, log_path),
     ) as pool:
-        for _ in pool.imap_unordered(process_dir, dirs, chunksize=1):
+        for result in pool.imap_unordered(process_dir, dirs, chunksize=1):
+            if result:
+                outfh.write(result)
+                outfh.flush()
             completed += 1
             last_update = _progress_update(completed, total, start, last_update, update_interval)
 
@@ -1091,7 +1111,7 @@ def _process_batched(args, domains, log_path, in_fasta, pref):
     print("", file=sys.stderr)
 
     # Create pool once, reuse across all batches
-    with Pool(
+    with open(args.outfile, "a") as outfh, Pool(
         processes=args.threads,
         initializer=_pool_init,
         initargs=(args, domains, log_path),
@@ -1105,7 +1125,10 @@ def _process_batched(args, domains, log_path, in_fasta, pref):
 
             # Step 3b: Process this batch
             batch_dirs = [str(Path(args.temp_dir) / e.safe_name) for e in batch]
-            for _ in pool.imap_unordered(process_dir, batch_dirs, chunksize=1):
+            for result in pool.imap_unordered(process_dir, batch_dirs, chunksize=1):
+                if result:
+                    outfh.write(result)
+                    outfh.flush()
                 completed += 1
                 last_update = _progress_update(completed, total, start, last_update, update_interval)
             # purge_subdirs is active, so process_dir already removed each subdir
