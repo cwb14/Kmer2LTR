@@ -406,6 +406,186 @@ def read_seq_string(seq_fa: Path) -> str:
     return "".join(seq_chunks)
 
 
+def _read_fasta_entry(seq_fa: Path):
+    """Read header text and sequence string from a single-sequence FASTA in one pass."""
+    header = ""
+    seq_chunks = []
+    with open(seq_fa) as fh:
+        for line in fh:
+            if line.startswith(">"):
+                header = line[1:].strip()
+            else:
+                seq_chunks.append(line.strip())
+    return header, "".join(seq_chunks)
+
+
+def _discover_and_extract_ltrs(seq, kmin, kmax, dist, std_factor, extension):
+    """
+    In-process replacement for the jellyfish + map_kmers + filter_kmers + extract_ltrs
+    subprocess chain.  Returns (ltr_5p, ltr_3p, end5p, start3p) or None.
+    All coordinates are 1-based inclusive.
+    """
+    seq_upper = seq.upper()
+    seq_len = len(seq_upper)
+    half_len = seq_len // 2
+
+    # --- Kmer discovery + position mapping (replaces jellyfish + map_kmers) ---
+    all_mapped = []  # (start1, end1, start2, end2) all 1-based
+    for k in range(kmin, kmax + 1):
+        kmer_positions = {}
+        for i in range(seq_len - k + 1):
+            kmer = seq_upper[i:i + k]
+            if kmer in kmer_positions:
+                kmer_positions[kmer].append(i)
+            else:
+                kmer_positions[kmer] = [i]
+
+        for positions in kmer_positions.values():
+            if len(positions) != 2:
+                continue
+            pos1, pos2 = (positions[0], positions[1]) if positions[0] <= positions[1] else (positions[1], positions[0])
+            if pos2 - pos1 < dist:
+                continue
+            s1 = pos1 + 1  # 1-based
+            s2 = pos2 + 1
+            if s1 > half_len or s2 <= half_len:
+                continue
+            all_mapped.append((s1, pos1 + k, s2, pos2 + k))
+
+    if not all_mapped:
+        return None
+
+    # --- Monotonicity + outlier filtering (replaces filter_kmers.py) ---
+    all_mapped.sort(key=lambda x: x[0])
+    monotonic = []
+    prev_s2 = None
+    for row in all_mapped:
+        s2 = row[2]
+        if prev_s2 is None or s2 >= prev_s2:
+            monotonic.append(row)
+            prev_s2 = s2
+    if not monotonic:
+        return None
+
+    n = len(monotonic)
+    s1_vals = [r[0] for r in monotonic]
+    s2_vals = [r[2] for r in monotonic]
+    mean1 = sum(s1_vals) / n
+    mean2 = sum(s2_vals) / n
+    if n > 1:
+        std1 = (sum((x - mean1) ** 2 for x in s1_vals) / n) ** 0.5
+        std2 = (sum((x - mean2) ** 2 for x in s2_vals) / n) ** 0.5
+    else:
+        std1 = std2 = 0.0
+
+    lo1 = mean1 - std_factor * std1 if std1 > 0 else float('-inf')
+    hi1 = mean1 + std_factor * std1 if std1 > 0 else float('inf')
+    lo2 = mean2 - std_factor * std2 if std2 > 0 else float('-inf')
+    hi2 = mean2 + std_factor * std2 if std2 > 0 else float('inf')
+
+    filtered = [(s1, e1, s2, e2) for s1, e1, s2, e2 in monotonic
+                if lo1 <= s1 <= hi1 and lo2 <= s2 <= hi2]
+    if not filtered:
+        return None
+
+    # --- LTR extraction (replaces extract_ltrs.py) ---
+    max_end1 = max(e1 for _, e1, _, _ in filtered)
+    min_start2 = min(s2 for _, _, s2, _ in filtered)
+
+    len5p = max_end1
+    len3p = seq_len - (min_start2 - 1)
+    new_end1 = max_end1
+    new_start2 = min_start2
+
+    if len5p < len3p:
+        new_end1 += len3p - len5p
+        if new_end1 > seq_len:
+            new_end1 = seq_len
+    elif len3p < len5p:
+        new_start2 -= len5p - len3p
+        if new_start2 < 1:
+            new_start2 = 1
+
+    new_end1 += extension
+    if new_end1 > seq_len:
+        new_end1 = seq_len
+    new_start2 -= extension
+    if new_start2 < 1:
+        new_start2 = 1
+
+    prop_5p = new_end1
+    prop_3p = seq_len - new_start2 + 1
+    max_no_overlap = seq_len // 2
+    final_len = min(max_no_overlap, prop_5p, prop_3p)
+
+    new_end1 = final_len
+    new_start2 = seq_len - final_len + 1
+
+    return (seq[0:new_end1], seq[new_start2 - 1:], new_end1, new_start2)
+
+
+def _run_wfa_and_filter(aln_clean, proposed_len, mutation_rate, max_win_overdisp, outfile, verbose):
+    """
+    Run WFA on a trimmed alignment and post-process in Python.
+    Replaces the shell pipeline: wfa | cut | sed | awk | awk | awk | awk.
+    """
+    cmd = [
+        str(WFA_BIN),
+        "-E", "10000", "-e", "10000", "-o", "10000", "-O", "10000",
+        "-u", str(mutation_rate), "-W", "50", "-k", "5", "-K",
+        str(aln_clean),
+    ]
+    if verbose:
+        print("Running:", " ".join(cmd))
+
+    result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    line = result.stdout.strip()
+    if not line:
+        return
+
+    fields = line.split("\t")
+    # WFA output (format=full, -W 50, -k 5 -K): 19 columns
+    # 0:h1  1:h2  2:cigar  3:identity  4:pairs  5:total_subs  6:transitions
+    # 7:transversions  8:raw_d  9:raw_T  10:JC69_d  11:JC69_T  12:K2P_d
+    # 13:K2P_T  14:left_trim  15:right_trim  16:win_n  17:win_mean  18:win_overdisp
+    if len(fields) < 14:
+        return
+
+    # Equivalent of cut -f1,5-  (keep h1 and cols 5+, i.e. fields[0] + fields[4:])
+    h1 = fields[0]
+    kept = list(fields[4:])  # pairs onward
+
+    # Fix negative zeros
+    kept = [f.replace("-0.000000", "0.000000") for f in kept]
+
+    # Clean header: strip _5prime* or _3prime* suffix
+    h1 = re.sub(r'_(5prime|3prime).*$', '', h1)
+
+    # kept[4] = raw_d (p-distance).  Filter: raw_d <= 0.35
+    try:
+        if float(kept[4]) > 0.35:
+            return
+    except (ValueError, IndexError):
+        return
+
+    # Optional overdispersion filter on last column (always present with -W 50)
+    if max_win_overdisp is not None and len(kept) > 3:
+        try:
+            if float(kept[-1]) > max_win_overdisp:
+                return
+        except ValueError:
+            pass
+
+    # Drop last 3 columns (win_n, win_mean, win_overdisp) if present
+    if len(kept) > 3:
+        kept = kept[:-3]
+
+    # Insert proposed_len as second column
+    out_line = "\t".join([h1, str(proposed_len)] + kept) + "\n"
+    with open(outfile, "a") as ofile:
+        ofile.write(out_line)
+
+
 def read_existing_ids(results_path: str) -> set[str]:
     """
     Return the set of first-column IDs already present in an existing results file.
@@ -546,24 +726,10 @@ def try_fast_path(dir_path: Path, header_token: str, seq_len: int) -> bool:
     # Fast-path: use DOMAINS_TSV value directly, do NOT subtract extension
     reported_len = ltr_len
 
-    # Final WFA and append results (same filtering as heavy path)
-    cmd_str = (
-        f"{q(str(WFA_BIN))} -E 10000 -e 10000 -o 10000 -O 10000 -u {ARGS.mutation_rate} -W 50 -k 5 -K "
-        f"{q(str(dir_path / 'LTRs.aln.clean'))}"
-        " | cut -f1,5- | sed -e 's/-0\\.000000/0.000000/g' | "
-        "awk -F'\t' '{if($1~/_(5prime|3prime)/) sub(/_(5prime|3prime).*$/, \"\", $1); print}' OFS='\t' | "
-        "awk '$6 <= 0.35' "
-        # Optional filter on last column (win_overdisp) if requested
-        + (f" | awk -v M={ARGS.max_win_overdisp} '($NF+0) <= M' " if ARGS.max_win_overdisp is not None else "")
-        # Always drop the three window cols (win_n, win_mean, win_overdisp)
-        + "| awk 'BEGIN{OFS=\"\\t\"} {if(NF>3) NF=NF-3; print}' "
-        + f"| awk -v P={reported_len} 'BEGIN{{OFS=\"\\t\"}} {{for(i=NF;i>=2;i--) $(i+1)=$(i); $2=P; print}}' "
+    _run_wfa_and_filter(
+        dir_path / "LTRs.aln.clean", reported_len,
+        ARGS.mutation_rate, ARGS.max_win_overdisp, ARGS.outfile, ARGS.verbose,
     )
-
-    if ARGS.verbose:
-        print("Running:", cmd_str)
-    with open(ARGS.outfile, "a") as ofile:
-        subprocess.run(cmd_str, shell=True, check=True, stdout=ofile)
 
     return True
 
@@ -594,12 +760,10 @@ def process_dir(dir_path):
             print(f"Processing {dir_path}")
         seq_fa = dir_path / "seq.fa"
 
-        # Header token (the same notion used for domains lookup)
-        with open(seq_fa) as fh:
-            first = next((ln for ln in fh if ln.startswith(">")), None)
-        header_token = first[1:].strip().split()[0] if first else dir_path.name
-
-        seq_len = sum(len(line.strip()) for line in seq_fa.open() if not line.startswith(">"))
+        # Read header and sequence once (avoids repeated file reads)
+        full_header, seq = _read_fasta_entry(seq_fa)
+        header_token = full_header.split()[0] if full_header else dir_path.name
+        seq_len = len(seq)
 
         if seq_len < MIN_SEQ_BP:
             log_msg(f"[SKIP] {dir_path.name} length {seq_len} < {MIN_SEQ_BP} bp; skipping as likely erroneous.")
@@ -616,60 +780,22 @@ def process_dir(dir_path):
         except Exception as e:
             print(f"[FAST-PATH ERROR] {header_token}: {e}. Falling back to full pipeline.")
 
-        # ===== ORIGINAL HEAVY PIPELINE =====
+        # ===== HEAVY PIPELINE (in-process kmer discovery) =====
 
-        # K-mer counting and mapping
-        for k in range(kmin, kmax + 1):
-            jf_file = dir_path / "seq.jf"
-            run_cmd([
-                "jellyfish", "count", "-m", str(k), "-s", str(seq_len), "-t", "1",
-                "-o", str(jf_file), str(seq_fa)
-            ], verbose)
-
-            run_cmd([
-                "jellyfish", "dump", "-c", "-L", "2", "-U", "2",
-                "-o", str(dir_path / "kmer_duet.txt"), str(jf_file)
-            ], verbose)
-
-            mapped_file = dir_path / f"kmer_duet_k{k}.mapped"
-            run_cmd_output([
-                "python", str(SCRIPT_DIR / "map_kmers_to_fasta.py"),
-                str(dir_path / "kmer_duet.txt"), str(seq_fa),
-                "-d", str(dist)
-            ], mapped_file, verbose=verbose)
-
-        # Concatenate mapped kmers
-        combined_file = dir_path / f"kmer_duet_k{kmin}_{kmax}.mapped"
-        with open(combined_file, "w") as outfile:
-            for k in range(kmin, kmax + 1):
-                part = dir_path / f"kmer_duet_k{k}.mapped"
-                with open(part) as infile:
-                    outfile.write(infile.read())
-
-        filtered_file = dir_path / f"kmer_duet_k{kmin}_{kmax}.mapped.filtered"
-        run_cmd([
-            "python", str(SCRIPT_DIR / "filter_kmers.py"), str(combined_file),
-            "--std-factor", str(std_factor),
-            "-o", str(filtered_file)
-        ], verbose)
-
-        # Short-circuit if empty or header-only
-        if not has_data_rows(filtered_file):
-            log_msg(f"[SKIP] No k-mer pairs after filtering for {dir_path.name} "
-                    f"({filtered_file} is empty/header-only).")
+        ltr_result = _discover_and_extract_ltrs(seq, kmin, kmax, dist, std_factor, extension)
+        if ltr_result is None:
+            log_msg(f"[SKIP] No valid kmer pairs for {dir_path.name}.")
             try:
                 (dir_path / "SKIPPED.no_filtered_pairs").write_text("")
             except Exception:
                 pass
             return
 
-        # Extract LTRs
+        ltr_5p, ltr_3p, end5p, start3p = ltr_result
         ltrs_fa = dir_path / "LTRs.fa"
-        run_cmd([
-            "python", str(SCRIPT_DIR / "extract_ltrs.py"),
-            "-e", str(extension),
-            str(filtered_file), str(seq_fa), str(ltrs_fa)
-        ], verbose)
+        with open(ltrs_fa, "w") as out:
+            out.write(f">{full_header}\t5p:1-{end5p}\n{ltr_5p}\n")
+            out.write(f">{full_header}\t3p:{start3p}-{seq_len}\n{ltr_3p}\n")
 
         # Align and trim
         aln_fa = dir_path / "LTRs.aln.fa"
@@ -725,22 +851,10 @@ def process_dir(dir_path):
             proposed_adj = max(proposed_len - ARGS.extension, 0)
 
         # Final WFA and append results
-        cmd_str = (
-            f"{q(str(WFA_BIN))} -E 10000 -e 10000 -o 10000 -O 10000 -u {args.mutation_rate} -W 50 -k 5 -K "
-            f"{q(str(dir_path / 'LTRs.aln.clean'))}"
-            " | cut -f1,5- | sed -e 's/-0\\.000000/0.000000/g' | "
-            "awk -F'\t' '{if($1~/_(5prime|3prime)/) sub(/_(5prime|3prime).*$/, \"\", $1); print}' OFS='\t' | "
-            "awk '$6 <= 0.35' "
-            # Optional filter on last column (win_overdisp) if requested
-            + (f" | awk -v M={args.max_win_overdisp} '($NF+0) <= M' " if args.max_win_overdisp is not None else "")
-            # Always drop the three window cols (win_n, win_mean, win_overdisp)
-            + "| awk 'BEGIN{OFS=\"\\t\"} {if(NF>3) NF=NF-3; print}' "
-            + f"| awk -v P={proposed_adj} 'BEGIN{{OFS=\"\\t\"}} {{for(i=NF;i>=2;i--) $(i+1)=$(i); $2=P; print}}' "
+        _run_wfa_and_filter(
+            dir_path / "LTRs.aln.clean", proposed_adj,
+            args.mutation_rate, args.max_win_overdisp, out_file, verbose,
         )
-        if verbose:
-            print("Running:", cmd_str)
-        with open(out_file, "a") as ofile:
-            subprocess.run(cmd_str, shell=True, check=True, stdout=ofile)
 
     finally:
         # Always try to remove the subdir if purge_subdirs is enabled
