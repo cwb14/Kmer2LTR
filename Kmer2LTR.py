@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import shlex
 import sys
+import tempfile
 import time
 from copy import deepcopy
 import platform
@@ -120,6 +121,17 @@ def sum_ungapped_bp(fasta_path: Path) -> int:
     return total
 
 
+def _sum_ungapped_bp_str(data: str) -> int:
+    """Count total ungapped basepairs from a FASTA string."""
+    total = 0
+    for line in data.splitlines():
+        if not line or line.startswith(">"):
+            continue
+        s = line.strip()
+        total += len(s) - s.count("-")
+    return total
+
+
 def _read_aln_stats(aln_fa: Path):
     """Read proposed LTR length from header and count ungapped bp in one pass."""
     proposed_len = None
@@ -136,6 +148,64 @@ def _read_aln_stats(aln_fa: Path):
                 if s:
                     total_bp += len(s) - s.count("-")
     return proposed_len, total_bp
+
+
+def _read_aln_stats_str(data: str):
+    """Extract proposed LTR length and count ungapped bp from a FASTA string."""
+    proposed_len = None
+    total_bp = 0
+    for line in data.splitlines():
+        if line.startswith(">"):
+            if proposed_len is None:
+                m = re.search(r"5p:1-(\d+)", line)
+                if m:
+                    proposed_len = int(m.group(1))
+        else:
+            s = line.strip()
+            if s:
+                total_bp += len(s) - s.count("-")
+    return proposed_len, total_bp
+
+
+# ---- In-memory mafft/trimal helpers ---- #
+
+def _run_mafft_mem(fasta_str: str, verbose: bool) -> str:
+    """Run mafft on a FASTA string. Uses /dev/shm temp file, captures aligned output in memory."""
+    fd, tmp_path = tempfile.mkstemp(suffix='.fa', dir='/dev/shm')
+    try:
+        with os.fdopen(fd, 'w') as f:
+            f.write(fasta_str)
+        cmd = ["mafft", "--auto", "--thread", "1", tmp_path]
+        if verbose:
+            print("Running:", " ".join(cmd))
+        result = subprocess.run(cmd, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, text=True)
+        if result.returncode != 0:
+            raise subprocess.CalledProcessError(result.returncode, cmd)
+        return result.stdout
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+
+def _run_trimal_mem(aln_str: str, verbose: bool) -> str:
+    """Run trimal on an alignment string. Uses /dev/shm temp file (trimal needs seekable input)."""
+    fd, tmp_path = tempfile.mkstemp(suffix='.fa', dir='/dev/shm')
+    try:
+        with os.fdopen(fd, 'w') as f:
+            f.write(aln_str)
+        cmd = ["trimal", "-automated1", "-keepheader", "-in", tmp_path]
+        if verbose:
+            print("Running:", " ".join(cmd))
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        return result.stdout
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
 
 
 def _format_hms(seconds: float) -> str:
@@ -546,18 +616,27 @@ def _discover_and_extract_ltrs(seq, kmin, kmax, dist, std_factor, extension):
 def _run_wfa_and_filter(aln_clean, proposed_len, mutation_rate, max_win_overdisp, verbose):
     """
     Run WFA on a trimmed alignment and post-process in Python.
-    Replaces the shell pipeline: wfa | cut | sed | awk | awk | awk | awk.
+    aln_clean: Path (read from file) or str (pipe via stdin).
     """
-    cmd = [
-        str(WFA_BIN),
-        "-E", "10000", "-e", "10000", "-o", "10000", "-O", "10000",
-        "-u", str(mutation_rate), "-W", "50", "-k", "5", "-K",
-        str(aln_clean),
-    ]
-    if verbose:
-        print("Running:", " ".join(cmd))
-
-    result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    if isinstance(aln_clean, str):
+        cmd = [
+            str(WFA_BIN),
+            "-E", "10000", "-e", "10000", "-o", "10000", "-O", "10000",
+            "-u", str(mutation_rate), "-W", "50", "-k", "5", "-K", "-",
+        ]
+        if verbose:
+            print("Running:", " ".join(cmd), "(stdin)")
+        result = subprocess.run(cmd, input=aln_clean, capture_output=True, text=True, check=True)
+    else:
+        cmd = [
+            str(WFA_BIN),
+            "-E", "10000", "-e", "10000", "-o", "10000", "-O", "10000",
+            "-u", str(mutation_rate), "-W", "50", "-k", "5", "-K",
+            str(aln_clean),
+        ]
+        if verbose:
+            print("Running:", " ".join(cmd))
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
     line = result.stdout.strip()
     if not line:
         return
@@ -685,45 +764,34 @@ def try_fast_path(dir_path: Path, header_token: str, seq_len: int, seq: str) -> 
     if ext_len > cap:
         ext_len = cap
 
-    # Perform direct extraction into LTRs.fa (not aln.clean)
+    # Perform direct extraction
     five_p = seq[:ext_len]
     three_p = seq[-ext_len:]
 
-    ltrs_fa = dir_path / "LTRs.fa"
-    with open(ltrs_fa, "w") as out:
-        out.write(f">{header_token}_5prime_LTR_len{ltr_len}_ext{ext_len}\n")
-        out.write(five_p + "\n")
-        out.write(f">{header_token}_3prime_LTR_len{ltr_len}_ext{ext_len}\n")
-        out.write(three_p + "\n")
+    fasta_str = (f">{header_token}_5prime_LTR_len{ltr_len}_ext{ext_len}\n"
+                 f"{five_p}\n"
+                 f">{header_token}_3prime_LTR_len{ltr_len}_ext{ext_len}\n"
+                 f"{three_p}\n")
 
     if ARGS.verbose:
         print(f"[FAST-PATH] {dir_path.name}: extracted 5′/3′ ({ext_len} bp each) using domains TSV (LTR={ltr_len}, ext={ARGS.extension}).")
 
-    # Align and trim (MAFFT -> trimal)
-    aln_fa = dir_path / "LTRs.aln.fa"
-    run_cmd_output([
-        "mafft", "--auto", "--thread", "1", str(ltrs_fa)
-    ], aln_fa, stderr=subprocess.DEVNULL, verbose=ARGS.verbose)
-
-    run_cmd([
-        "trimal",
-        "-automated1",  # -strictplus might be better... at least it appears better with 'python Kmer2LTR/lib_mutator.py -i lib_clean.fa -mp 10 -TiTv 2 -idel_freq 0.05 -idel_size 1,5'
-        "-keepheader",
-        "-in", str(aln_fa),
-        "-out", str(dir_path / "LTRs.aln.clean")
-    ], ARGS.verbose)
-
-    # Short-circuit if trimmed alignment is too short vs raw alignment
+    # In-memory pipeline: MAFFT -> trimal -> quality check
     try:
-        raw_bp = sum_ungapped_bp(aln_fa)
-        clean_bp = sum_ungapped_bp(dir_path / "LTRs.aln.clean")
-    except FileNotFoundError as e:
-        print(f"[SKIP] Missing alignment file for {dir_path.name}: {e}")
-        try:
-            (dir_path / "SKIPPED.missing_alignment").write_text(str(e))
-        except Exception:
-            pass
-        return (True, None)  # fast-path executed, even if skipped downstream
+        aln_data = _run_mafft_mem(fasta_str, ARGS.verbose)
+    except subprocess.CalledProcessError:
+        print(f"[SKIP] mafft failed for {dir_path.name}")
+        return (True, None)
+
+    raw_bp = _sum_ungapped_bp_str(aln_data)
+
+    try:
+        clean_data = _run_trimal_mem(aln_data, ARGS.verbose)
+    except subprocess.CalledProcessError:
+        print(f"[SKIP] trimal failed for {dir_path.name}")
+        return (True, None)
+
+    clean_bp = _sum_ungapped_bp_str(clean_data)
 
     threshold = ARGS.min_retained_fraction * raw_bp
     if (clean_bp + ARGS.extension) <= threshold:
@@ -732,20 +800,13 @@ def try_fast_path(dir_path: Path, header_token: str, seq_len: int, seq: str) -> 
             f"clean_bp({clean_bp}) + ext({ARGS.extension}) <= "
             f"{ARGS.min_retained_fraction:.3f} * raw_bp({raw_bp:.0f})"
         )
-        try:
-            (dir_path / "SKIPPED.too_trimmed").write_text(
-                f"raw_bp={raw_bp}\nclean_bp={clean_bp}\nextension={ARGS.extension}\n"
-                f"min_retained_fraction={ARGS.min_retained_fraction}\nthreshold={threshold}\n"
-            )
-        except Exception:
-            pass
         return (True, None)  # fast-path executed, but result skipped
 
     # Fast-path: use DOMAINS_TSV value directly, do NOT subtract extension
     reported_len = ltr_len
 
     result = _run_wfa_and_filter(
-        dir_path / "LTRs.aln.clean", reported_len,
+        clean_data, reported_len,
         ARGS.mutation_rate, ARGS.max_win_overdisp, ARGS.verbose,
     )
 
@@ -810,36 +871,25 @@ def process_dir(dir_path):
             return
 
         ltr_5p, ltr_3p, end5p, start3p = ltr_result
-        ltrs_fa = dir_path / "LTRs.fa"
-        with open(ltrs_fa, "w") as out:
-            out.write(f">{full_header}\t5p:1-{end5p}\n{ltr_5p}\n")
-            out.write(f">{full_header}\t3p:{start3p}-{seq_len}\n{ltr_3p}\n")
+        fasta_str = (f">{full_header}\t5p:1-{end5p}\n{ltr_5p}\n"
+                     f">{full_header}\t3p:{start3p}-{seq_len}\n{ltr_3p}\n")
 
-        # Align and trim
-        aln_fa = dir_path / "LTRs.aln.fa"
-        run_cmd_output([
-            "mafft", "--auto", "--thread", "1", str(ltrs_fa)
-        ], aln_fa, stderr=subprocess.DEVNULL, verbose=verbose)
-
-        run_cmd([
-            "trimal",
-            "-automated1",  # -strictplus might be better... at least it appears better with 'python Kmer2LTR/lib_mutator.py -i lib_clean.fa -mp 10 -TiTv 2 -idel_freq 0.05 -idel_size 1,5'
-            "-keepheader",  # keep original headers
-            "-in", str(aln_fa),
-            "-out", str(dir_path / "LTRs.aln.clean")
-        ], verbose)
-
-        # ----- Short-circuit if trimmed alignment is too short vs raw alignment -----
+        # In-memory pipeline: MAFFT -> trimal -> quality check -> WFA
         try:
-            proposed_len, raw_bp = _read_aln_stats(aln_fa)   # one pass over LTRs.aln.fa
-            clean_bp = sum_ungapped_bp(dir_path / "LTRs.aln.clean")
-        except FileNotFoundError as e:
-            print(f"[SKIP] Missing alignment file for {dir_path.name}: {e}")
-            try:
-                (dir_path / "SKIPPED.missing_alignment").write_text(str(e))
-            except Exception:
-                pass
+            aln_data = _run_mafft_mem(fasta_str, verbose)
+        except subprocess.CalledProcessError:
+            print(f"[SKIP] mafft failed for {dir_path.name}")
             return
+
+        proposed_len, raw_bp = _read_aln_stats_str(aln_data)
+
+        try:
+            clean_data = _run_trimal_mem(aln_data, verbose)
+        except subprocess.CalledProcessError:
+            print(f"[SKIP] trimal failed for {dir_path.name}")
+            return
+
+        clean_bp = _sum_ungapped_bp_str(clean_data)
 
         # Require: sum_bp(clean) + extension > (min_retained_fraction * sum_bp(raw))
         threshold = args.min_retained_fraction * raw_bp
@@ -850,13 +900,6 @@ def process_dir(dir_path):
                 f"clean_bp({clean_bp}) + ext({extension}) <= "
                 f"{args.min_retained_fraction:.3f} * raw_bp({raw_bp:.0f})"
             )
-            try:
-                (dir_path / "SKIPPED.too_trimmed").write_text(
-                    f"raw_bp={raw_bp}\nclean_bp={clean_bp}\nextension={extension}\n"
-                    f"min_retained_fraction={args.min_retained_fraction}\nthreshold={threshold}\n"
-                )
-            except Exception:
-                pass
             return
 
         # Adjust proposed LTR len by extension
@@ -867,9 +910,9 @@ def process_dir(dir_path):
         else:
             proposed_adj = max(proposed_len - ARGS.extension, 0)
 
-        # Final WFA
+        # Final WFA (in-memory via stdin)
         return _run_wfa_and_filter(
-            dir_path / "LTRs.aln.clean", proposed_adj,
+            clean_data, proposed_adj,
             args.mutation_rate, args.max_win_overdisp, verbose,
         )
 

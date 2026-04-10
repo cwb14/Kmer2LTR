@@ -63,8 +63,7 @@ void print_usage(const char* prog) {
          << "  [if -W>0: win_n, win_mean, win_overdisp]\n";
 }
 
-bool read_two_fasta(const string& path, string& h1, string& s1, string& h2, string& s2) {
-    ifstream in(path);
+bool read_two_fasta(istream& in, string& h1, string& s1, string& h2, string& s2) {
     if (!in) return false;
     string line, header, seq;
     vector<pair<string,string>> recs;
@@ -520,11 +519,19 @@ int main(int argc, char** argv) {
     }
     const string fasta_path = argv[optind];
 
-    // read two FASTA records
+    // read two FASTA records (from file or stdin if path is "-")
     string h1, s1, h2, s2;
-    if (!read_two_fasta(fasta_path, h1, s1, h2, s2)) {
-        cerr << "Error: need exactly two sequences in " << fasta_path << "\n";
-        return 1;
+    if (fasta_path == "-") {
+        if (!read_two_fasta(cin, h1, s1, h2, s2)) {
+            cerr << "Error: need exactly two sequences on stdin\n";
+            return 1;
+        }
+    } else {
+        ifstream fin(fasta_path);
+        if (!read_two_fasta(fin, h1, s1, h2, s2)) {
+            cerr << "Error: need exactly two sequences in " << fasta_path << "\n";
+            return 1;
+        }
     }
 
     // run the 2-piece gap-affine aligner
