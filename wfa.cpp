@@ -54,6 +54,7 @@ void print_usage(const char* prog) {
          << "  -S <int>        slide size (default W/2)\n"
          << "  -k <int>        trim unreliable ends: require k consecutive matches to enter/exit reliable region (default 0=off)\n"
          << "  -K              exclude the k boundary-match columns from the reliable region metrics (requires -k>0 and successful trimming)\n"
+         << "  -F              FASTA output: emit aligned sequences (with gaps) instead of stats\n"
          << "  -d              debug: print a 3-line alignment view to stderr (also prints 5' and 3' k-mers around boundaries)\n"
          << "  -h              show this help message\n\n"
          << "Output columns:\n"
@@ -481,11 +482,12 @@ int main(int argc, char** argv) {
 
     bool debug = false;
     bool exclude_k = false;
+    bool fasta_output = false;
 
     // parse options
     int opt;
 
-    while ((opt = getopt(argc, argv, "x:O:E:o:e:c:u:W:S:k:Kdh")) != -1) {
+    while ((opt = getopt(argc, argv, "x:O:E:o:e:c:u:W:S:k:KFdh")) != -1) {
 
         switch (opt) {
             case 'x': mismatch = stoi(optarg);   break;
@@ -499,6 +501,7 @@ int main(int argc, char** argv) {
             case 'S': S        = stoi(optarg);   break;
             case 'k': ktrim    = stoi(optarg);   break;
             case 'K': exclude_k = true;          break;
+            case 'F': fasta_output = true;       break;
             case 'd': debug    = true;           break;
             case 'h':
             default:
@@ -548,6 +551,14 @@ int main(int argc, char** argv) {
     // get CIGAR
     string cigar = aligner.getCIGAR(format=="full");
     const bool format_full = (format == "full");
+
+    // FASTA output mode: emit aligned sequences and exit
+    if (fasta_output) {
+        AlignView av = build_alignment_view(cigar, s1, s2);
+        cout << ">" << h1 << "\n" << av.a1 << "\n"
+             << ">" << h2 << "\n" << av.a2 << "\n";
+        return 0;
+    }
 
     // determine reliable region bounds in alignment columns
     ReliableBounds rb = find_reliable_bounds_k(cigar, s1, s2, format_full, ktrim);

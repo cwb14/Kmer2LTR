@@ -167,10 +167,10 @@ def _read_aln_stats_str(data: str):
     return proposed_len, total_bp
 
 
-# ---- In-memory mafft/trimal helpers ---- #
+# ---- In-memory alignment/trimal helpers ---- #
 
 def _run_mafft_mem(fasta_str: str, verbose: bool) -> str:
-    """Run mafft on a FASTA string. Uses /dev/shm temp file, captures aligned output in memory."""
+    """Align two sequences via mafft. Uses /dev/shm temp file, captures aligned output in memory."""
     fd, tmp_path = tempfile.mkstemp(suffix='.fa', dir='/dev/shm')
     try:
         with os.fdopen(fd, 'w') as f:
@@ -188,6 +188,24 @@ def _run_mafft_mem(fasta_str: str, verbose: bool) -> str:
             os.unlink(tmp_path)
         except OSError:
             pass
+
+
+def _run_wfa_align_mem(fasta_str: str, verbose: bool) -> str:
+    """Align two sequences via WFA in FASTA-output mode. Reads from stdin, returns aligned FASTA string."""
+    cmd = [str(WFA_BIN), "-F", "-"]
+    if verbose:
+        print("Running:", " ".join(cmd), "(stdin)")
+    result = subprocess.run(cmd, input=fasta_str, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise subprocess.CalledProcessError(result.returncode, cmd)
+    return result.stdout
+
+
+def _run_align_mem(fasta_str: str, verbose: bool) -> str:
+    """Dispatch to WFA or mafft based on ARGS.wfa_align."""
+    if ARGS.wfa_align:
+        return _run_wfa_align_mem(fasta_str, verbose)
+    return _run_mafft_mem(fasta_str, verbose)
 
 
 def _run_trimal_mem(aln_str: str, verbose: bool) -> str:
@@ -778,7 +796,7 @@ def try_fast_path(dir_path: Path, header_token: str, seq_len: int, seq: str) -> 
 
     # In-memory pipeline: MAFFT -> trimal -> quality check
     try:
-        aln_data = _run_mafft_mem(fasta_str, ARGS.verbose)
+        aln_data = _run_align_mem(fasta_str, ARGS.verbose)
     except subprocess.CalledProcessError:
         print(f"[SKIP] mafft failed for {dir_path.name}")
         return (True, None)
@@ -876,7 +894,7 @@ def process_dir(dir_path):
 
         # In-memory pipeline: MAFFT -> trimal -> quality check -> WFA
         try:
-            aln_data = _run_mafft_mem(fasta_str, verbose)
+            aln_data = _run_align_mem(fasta_str, verbose)
         except subprocess.CalledProcessError:
             print(f"[SKIP] mafft failed for {dir_path.name}")
             return
@@ -1302,6 +1320,15 @@ if __name__ == "__main__":
     parser.add_argument(
         "--no-plot", action="store_true", dest="no_plot",
         help="Disable plotting of results into kmer2ltr_density.pdf."
+    )
+    parser.add_argument(
+        "--wfa-align", action="store_true", dest="wfa_align",
+        help=(
+            "Use WFA instead of mafft for pairwise LTR alignment. "
+            "Much faster (~30-50x) but uses a different alignment algorithm, "
+            "so divergence estimates may differ slightly. "
+            "Default: use mafft."
+        )
     )
     parser.add_argument(
         "-i", "--input-fastas",
