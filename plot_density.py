@@ -55,6 +55,8 @@ def read_tsv_cols(path: str, dist_idx: int, time_idx: int) -> Tuple[np.ndarray, 
                 t = float(parts[time_idx])
             except ValueError:
                 continue
+            if not (np.isfinite(d) and np.isfinite(t)):
+                continue
             dists.append(d)
             times.append(t)
     if not dists:
