@@ -526,6 +526,58 @@ def _read_fasta_entry(seq_fa: Path):
     return header, "".join(seq_chunks)
 
 
+def _lis_indices(values):
+    """
+    Longest Increasing Subsequence (non-strict) via patience sort.
+    Returns the indices into `values` that form the LIS.
+    O(n log n) time.
+    """
+    import bisect
+    n = len(values)
+    if n == 0:
+        return []
+
+    # tails[i] = smallest tail value for an increasing subsequence of length i+1
+    tails = []
+    # For each position, which LIS length it extends
+    lis_len_at = [0] * n
+    # For backtracking: predecessor index
+    predecessor = [-1] * n
+    # tail_idx[i] = index in values[] of tails[i]
+    tail_idx = []
+
+    for i in range(n):
+        v = values[i]
+        # bisect_right for non-strict (>=) increasing
+        pos = bisect.bisect_right(tails, v)
+        if pos == len(tails):
+            tails.append(v)
+            tail_idx.append(i)
+        else:
+            tails[pos] = v
+            tail_idx[pos] = i
+        lis_len_at[i] = pos
+        predecessor[i] = tail_idx[pos - 1] if pos > 0 else -1
+
+    # Backtrack to recover the actual subsequence
+    lis_length = len(tails)
+    result = []
+    idx = tail_idx[lis_length - 1]
+    for _ in range(lis_length):
+        result.append(idx)
+        idx = predecessor[idx]
+    result.reverse()
+    return result
+
+
+# Maximum number of occurrences for a kmer to be considered informative.
+# Above this, the kmer is likely low-complexity / microsatellite.
+_MAX_KMER_OCCURRENCES = 10
+
+# Minimum number of collinear pairs after LIS to trust the boundary call.
+_MIN_LIS_PAIRS = 20
+
+
 def _discover_and_extract_ltrs(seq, kmin, kmax, dist, std_factor, extension):
     """
     In-process replacement for the jellyfish + map_kmers + filter_kmers + extract_ltrs
@@ -537,6 +589,8 @@ def _discover_and_extract_ltrs(seq, kmin, kmax, dist, std_factor, extension):
     half_len = seq_len // 2
 
     # --- Kmer discovery + position mapping (replaces jellyfish + map_kmers) ---
+    # Kmers appearing up to _MAX_KMER_OCCURRENCES times are kept; all valid
+    # cross-half pairs are generated.  LIS resolves ambiguity downstream.
     all_mapped = []  # (start1, end1, start2, end2) all 1-based
     for k in range(kmin, kmax + 1):
         kmer_positions = {}
@@ -548,56 +602,44 @@ def _discover_and_extract_ltrs(seq, kmin, kmax, dist, std_factor, extension):
                 kmer_positions[kmer] = [i]
 
         for positions in kmer_positions.values():
-            if len(positions) != 2:
+            if len(positions) < 2 or len(positions) > _MAX_KMER_OCCURRENCES:
                 continue
-            pos1, pos2 = (positions[0], positions[1]) if positions[0] <= positions[1] else (positions[1], positions[0])
-            if pos2 - pos1 < dist:
-                continue
-            s1 = pos1 + 1  # 1-based
-            s2 = pos2 + 1
-            if s1 > half_len or s2 <= half_len:
-                continue
-            all_mapped.append((s1, pos1 + k, s2, pos2 + k))
+            # Generate all valid (first-half, second-half) pairs
+            first_half = [p for p in positions if p + 1 <= half_len]
+            second_half = [p for p in positions if p + 1 > half_len]
+            for pos1 in first_half:
+                for pos2 in second_half:
+                    if pos2 - pos1 < dist:
+                        continue
+                    s1 = pos1 + 1  # 1-based
+                    s2 = pos2 + 1
+                    all_mapped.append((s1, pos1 + k, s2, pos2 + k))
 
     if not all_mapped:
         return None
 
-    # --- Monotonicity + outlier filtering (replaces filter_kmers.py) ---
-    all_mapped.sort(key=lambda x: x[0])
-    monotonic = []
-    prev_s2 = None
-    for row in all_mapped:
-        s2 = row[2]
-        if prev_s2 is None or s2 >= prev_s2:
-            monotonic.append(row)
-            prev_s2 = s2
-    if not monotonic:
+    # --- Longest Increasing Subsequence on s2 (replaces greedy filter) ---
+    # Sort by s1, break ties by s2 so overlapping kmer sizes don't collide.
+    all_mapped.sort(key=lambda x: (x[0], x[2]))
+    s2_values = [row[2] for row in all_mapped]
+    lis_idx = _lis_indices(s2_values)
+    monotonic = [all_mapped[i] for i in lis_idx]
+
+    if len(monotonic) < _MIN_LIS_PAIRS:
         return None
 
+    # --- Percentile-based LTR boundary extraction ---
+    end1_vals = sorted(e1 for _, e1, _, _ in monotonic)
+    start2_vals = sorted(s2 for _, _, s2, _ in monotonic)
     n = len(monotonic)
-    s1_vals = [r[0] for r in monotonic]
-    s2_vals = [r[2] for r in monotonic]
-    mean1 = sum(s1_vals) / n
-    mean2 = sum(s2_vals) / n
-    if n > 1:
-        std1 = (sum((x - mean1) ** 2 for x in s1_vals) / n) ** 0.5
-        std2 = (sum((x - mean2) ** 2 for x in s2_vals) / n) ** 0.5
-    else:
-        std1 = std2 = 0.0
 
-    lo1 = mean1 - std_factor * std1 if std1 > 0 else float('-inf')
-    hi1 = mean1 + std_factor * std1 if std1 > 0 else float('inf')
-    lo2 = mean2 - std_factor * std2 if std2 > 0 else float('-inf')
-    hi2 = mean2 + std_factor * std2 if std2 > 0 else float('inf')
+    # 98th percentile for the outer boundary of the 5' LTR
+    idx_98 = min(int(n * 0.98), n - 1)
+    max_end1 = end1_vals[idx_98]
 
-    filtered = [(s1, e1, s2, e2) for s1, e1, s2, e2 in monotonic
-                if lo1 <= s1 <= hi1 and lo2 <= s2 <= hi2]
-    if not filtered:
-        return None
-
-    # --- LTR extraction (replaces extract_ltrs.py) ---
-    max_end1 = max(e1 for _, e1, _, _ in filtered)
-    min_start2 = min(s2 for _, _, s2, _ in filtered)
+    # 2nd percentile for the inner boundary of the 3' LTR
+    idx_02 = max(int(n * 0.02), 0)
+    min_start2 = start2_vals[idx_02]
 
     len5p = max_end1
     len3p = seq_len - (min_start2 - 1)
@@ -678,8 +720,10 @@ def _run_wfa_and_filter(aln_clean, proposed_len, mutation_rate, max_win_overdisp
     h1 = re.sub(r'_(5prime|3prime).*$', '', h1)
 
     # kept[4] = raw_d (p-distance).  Filter: raw_d <= 0.35
+    # NaN comparisons return False, so check explicitly.
     try:
-        if float(kept[4]) > 0.35:
+        raw_d = float(kept[4])
+        if raw_d != raw_d or raw_d > 0.35:  # NaN != NaN is True
             return
     except (ValueError, IndexError):
         return
