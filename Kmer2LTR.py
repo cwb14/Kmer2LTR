@@ -686,7 +686,11 @@ def _run_wfa_and_filter(aln_clean, proposed_len, mutation_rate, max_win_overdisp
         ]
         if verbose:
             print("Running:", " ".join(cmd), "(stdin)")
-        result = subprocess.run(cmd, input=aln_clean, capture_output=True, text=True, check=True)
+        try:                                                                                                                                                         
+            result = subprocess.run(cmd, input=aln_clean, capture_output=True, text=True, check=True)                                                              
+        except subprocess.CalledProcessError as exc:                                                                                                          
+            print(f"[SKIP] WFA failed (exit {exc.returncode}): {exc.stderr.strip()[:200]}", flush=True)                                                       
+            return 
     else:
         cmd = [
             str(WFA_BIN),
@@ -696,7 +700,11 @@ def _run_wfa_and_filter(aln_clean, proposed_len, mutation_rate, max_win_overdisp
         ]
         if verbose:
             print("Running:", " ".join(cmd))
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        try:                                                                                                                                                  
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)                                                                          
+        except subprocess.CalledProcessError as exc:                                                                                                          
+            print(f"[SKIP] WFA failed (exit {exc.returncode}): {exc.stderr.strip()[:200]}", flush=True)                                                       
+            return  
     line = result.stdout.strip()
     if not line:
         return
