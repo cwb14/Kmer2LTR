@@ -170,8 +170,10 @@ def _read_aln_stats_str(data: str):
 # ---- In-memory alignment/trimal helpers ---- #
 
 def _run_mafft_mem(fasta_str: str, verbose: bool) -> str:
-    """Align two sequences via mafft. Uses /dev/shm temp file, captures aligned output in memory."""
-    fd, tmp_path = tempfile.mkstemp(suffix='.fa', dir='/dev/shm')
+    """Align two sequences via mafft. Uses /dev/shm if available (Linux), otherwise system temp, captures aligned output in memory."""
+    # Use shared memory if available (Linux performance), fallback to system temp (macOS compatibility)
+    temp_dir = '/dev/shm' if os.path.exists('/dev/shm') else None
+    fd, tmp_path = tempfile.mkstemp(suffix='.fa', dir=temp_dir)
     try:
         with os.fdopen(fd, 'w') as f:
             f.write(fasta_str)
@@ -209,8 +211,10 @@ def _run_align_mem(fasta_str: str, verbose: bool) -> str:
 
 
 def _run_trimal_mem(aln_str: str, verbose: bool) -> str:
-    """Run trimal on an alignment string. Uses /dev/shm temp file (trimal needs seekable input)."""
-    fd, tmp_path = tempfile.mkstemp(suffix='.fa', dir='/dev/shm')
+    """Run trimal on an alignment string. Uses /dev/shm if available (Linux), otherwise system temp (trimal needs seekable input)."""
+    # Use shared memory if available (Linux performance), fallback to system temp (macOS compatibility)
+    temp_dir = '/dev/shm' if os.path.exists('/dev/shm') else None
+    fd, tmp_path = tempfile.mkstemp(suffix='.fa', dir=temp_dir)
     try:
         with os.fdopen(fd, 'w') as f:
             f.write(aln_str)
