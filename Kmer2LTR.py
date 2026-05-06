@@ -230,6 +230,112 @@ def _run_trimal_mem(aln_str: str, verbose: bool) -> str:
             pass
 
 
+# ---- IUPAC consensus helpers (for optional --ltr-consensus output) ---- #
+
+# Two-base IUPAC ambiguity codes.
+_IUPAC_PAIR = {
+    frozenset(['A', 'G']): 'R',  # purine
+    frozenset(['C', 'T']): 'Y',  # pyrimidine
+    frozenset(['G', 'C']): 'S',  # strong (3 H-bonds)
+    frozenset(['A', 'T']): 'W',  # weak (2 H-bonds)
+    frozenset(['G', 'T']): 'K',  # keto
+    frozenset(['A', 'C']): 'M',  # amino
+}
+
+
+def _strip_gaps_fasta(aln_str: str) -> str:
+    """Remove '-' gaps from sequence lines of a FASTA string; preserve headers."""
+    out_lines = []
+    for line in aln_str.splitlines():
+        if line.startswith('>'):
+            out_lines.append(line)
+        else:
+            out_lines.append(line.replace('-', ''))
+    return '\n'.join(out_lines) + '\n'
+
+
+def _parse_fasta_records(fasta_str: str):
+    """Yield (header, sequence) pairs from a FASTA string."""
+    header = None
+    seq_parts = []
+    for line in fasta_str.splitlines():
+        if not line:
+            continue
+        if line.startswith('>'):
+            if header is not None:
+                yield header, ''.join(seq_parts)
+            header = line[1:].strip()
+            seq_parts = []
+        else:
+            seq_parts.append(line.strip())
+    if header is not None:
+        yield header, ''.join(seq_parts)
+
+
+def _build_iupac_consensus_pairwise(aligned_fasta_str: str):
+    """
+    Build an IUPAC consensus from a 2-sequence pairwise alignment string.
+
+    Per-column rules (uppercased):
+      - both ACGT and equal -> that base
+      - both ACGT and different -> 2-way IUPAC ambiguity (R/Y/S/W/K/M)
+      - exactly one '-' -> the non-gap base (or 'N' if non-ACGT)
+      - both '-' -> column skipped
+      - any non-ACGT, non-gap base -> 'N'
+
+    Returns the consensus string, or None if the input cannot be parsed as
+    exactly two equal-length non-empty sequences.
+    """
+    records = list(_parse_fasta_records(aligned_fasta_str))
+    if len(records) != 2:
+        return None
+    s1 = records[0][1].upper()
+    s2 = records[1][1].upper()
+    if not s1 or len(s1) != len(s2):
+        return None
+
+    bases = {'A', 'C', 'G', 'T'}
+    out = []
+    for a, b in zip(s1, s2):
+        if a == '-' and b == '-':
+            continue
+        if a == '-':
+            out.append(b if b in bases else 'N')
+            continue
+        if b == '-':
+            out.append(a if a in bases else 'N')
+            continue
+        if a == b:
+            out.append(a if a in bases else 'N')
+            continue
+        if a in bases and b in bases:
+            out.append(_IUPAC_PAIR.get(frozenset([a, b]), 'N'))
+        else:
+            out.append('N')
+    return ''.join(out)
+
+
+def _build_consensus_from_trimmed(clean_data: str, full_header: str, verbose: bool):
+    """
+    Build an IUPAC consensus FASTA record from a trimal-cleaned 2-sequence alignment.
+    Pipeline: strip gaps, re-align with WFA, compute IUPAC consensus.
+    Returns the FASTA record (with trailing newline), or None on failure.
+    """
+    ungapped = _strip_gaps_fasta(clean_data)
+    try:
+        wfa_aln = _run_wfa_align_mem(ungapped, verbose)
+    except subprocess.CalledProcessError as exc:
+        log_msg(f"[CONSENSUS-SKIP] WFA realignment failed for "
+                f"{full_header.split()[0] if full_header else '?'}: exit {exc.returncode}")
+        return None
+    cons = _build_iupac_consensus_pairwise(wfa_aln)
+    if not cons:
+        log_msg(f"[CONSENSUS-SKIP] Empty/invalid consensus for "
+                f"{full_header.split()[0] if full_header else '?'}")
+        return None
+    return f">{full_header}\n{cons}\n"
+
+
 def _format_hms(seconds: float) -> str:
     """Return 'Hh:Mm:Ss' for a nonnegative seconds value."""
     if not math.isfinite(seconds) or seconds < 0:
@@ -794,34 +900,35 @@ def parse_proposed_ltr_len_from_aln(aln_fa: Path) -> int | None:
     return None
 
 
-def try_fast_path(dir_path: Path, header_token: str, seq_len: int, seq: str) -> tuple[bool, str | None]:
+def try_fast_path(dir_path: Path, header_token: str, full_header: str, seq_len: int, seq: str):
     """
     Fast-path when domains TSV provides LTR length:
       - Safety checks
       - Extract first/last min(ltr_len + extension, seq_len//2) bp
-      - Write LTRs.fa
       - Run MAFFT -> trimal -> WFA, return result line
+      - Optionally also build an IUPAC consensus from the trimmed LTRs.
 
-    Returns (attempted, result_line):
-      (False, None)  if fast-path doesn't apply (fall back to full pipeline)
-      (True, None)   if fast-path ran but no result (filtered/skipped)
-      (True, str)    if fast-path produced a result line
+    Returns (attempted, (result_line, consensus_record)):
+      (False, (None, None))           fast-path doesn't apply (caller falls back)
+      (True,  (None, None))           fast-path ran but result was filtered/skipped
+      (True,  (result, None))         result produced, consensus disabled or skipped
+      (True,  (result, consensus))    result and consensus FASTA record produced
     """
     global ARGS, DOMAINS
     if not DOMAINS:
-        return (False, None)
+        return (False, (None, None))
 
     # Duplicate name? -> uncertain mapping -> full pipeline unless user overrides.
     if (dir_path / "DUPLICATE_NAME").exists() and not ARGS.assume_dup_same_ltr:
         if ARGS.verbose:
             print(f"[FAST-PATH SKIP] Duplicate header name detected for '{header_token}'. "
                   f"Use --assume-duplicate-same-ltr to override (risky).")
-        return (False, None)
+        return (False, (None, None))
     # If ARGS.assume_dup_same_ltr is True, proceed assuming all duplicates with this
     # header token share the same LTR length from DOMAINS.
 
     if header_token not in DOMAINS:
-        return (False, None)
+        return (False, (None, None))
 
     ltr_len = DOMAINS[header_token]
 
@@ -830,7 +937,7 @@ def try_fast_path(dir_path: Path, header_token: str, seq_len: int, seq: str) -> 
         if ARGS.verbose:
             print(f"[FAST-PATH SKIP] Safety check failed for '{header_token}': "
                   f"seq_len={seq_len} <= 2*{ltr_len}+50")
-        return (False, None)
+        return (False, (None, None))
 
     # Determine extraction length: min(ltr_len + extension, seq_len//2)
     ext_len = ltr_len + ARGS.extension
@@ -855,7 +962,7 @@ def try_fast_path(dir_path: Path, header_token: str, seq_len: int, seq: str) -> 
         aln_data = _run_align_mem(fasta_str, ARGS.verbose)
     except subprocess.CalledProcessError:
         print(f"[SKIP] mafft failed for {dir_path.name}")
-        return (True, None)
+        return (True, (None, None))
 
     raw_bp = _sum_ungapped_bp_str(aln_data)
 
@@ -863,7 +970,7 @@ def try_fast_path(dir_path: Path, header_token: str, seq_len: int, seq: str) -> 
         clean_data = _run_trimal_mem(aln_data, ARGS.verbose)
     except subprocess.CalledProcessError:
         print(f"[SKIP] trimal failed for {dir_path.name}")
-        return (True, None)
+        return (True, (None, None))
 
     clean_bp = _sum_ungapped_bp_str(clean_data)
 
@@ -874,7 +981,7 @@ def try_fast_path(dir_path: Path, header_token: str, seq_len: int, seq: str) -> 
             f"clean_bp({clean_bp}) + ext({ARGS.extension}) <= "
             f"{ARGS.min_retained_fraction:.3f} * raw_bp({raw_bp:.0f})"
         )
-        return (True, None)  # fast-path executed, but result skipped
+        return (True, (None, None))  # fast-path executed, but result skipped
 
     # Fast-path: use DOMAINS_TSV value directly, do NOT subtract extension
     reported_len = ltr_len
@@ -884,7 +991,11 @@ def try_fast_path(dir_path: Path, header_token: str, seq_len: int, seq: str) -> 
         ARGS.mutation_rate, ARGS.max_win_overdisp, ARGS.verbose,
     )
 
-    return (True, result)
+    consensus_record = None
+    if result is not None and getattr(ARGS, 'ltr_consensus', False) and not getattr(ARGS, 'wfa_align', False):
+        consensus_record = _build_consensus_from_trimmed(clean_data, full_header, ARGS.verbose)
+
+    return (True, (result, consensus_record))
 
 
 def process_dir(dir_path):
@@ -896,6 +1007,8 @@ def process_dir(dir_path):
 
     When ARGS.purge_subdirs is True, the per-sequence temp directory is removed
     at the end of processing (even if skipped or errors occur).
+
+    Always returns a tuple (divergence_line, consensus_record); either element may be None.
     """
     dir_path = Path(dir_path)
 
@@ -923,13 +1036,13 @@ def process_dir(dir_path):
                 (dir_path / "SKIPPED.too_short").write_text(f"seq_len={seq_len}\nmin={MIN_SEQ_BP}\n")
             except Exception:
                 pass
-            return
+            return (None, None)
 
         # ===== FAST-PATH TRY =====
         try:
-            attempted, result = try_fast_path(dir_path, header_token, seq_len, seq)
+            attempted, result_tuple = try_fast_path(dir_path, header_token, full_header, seq_len, seq)
             if attempted:
-                return result
+                return result_tuple
         except Exception as e:
             print(f"[FAST-PATH ERROR] {header_token}: {e}. Falling back to full pipeline.")
 
@@ -942,7 +1055,7 @@ def process_dir(dir_path):
                 (dir_path / "SKIPPED.no_filtered_pairs").write_text("")
             except Exception:
                 pass
-            return
+            return (None, None)
 
         ltr_5p, ltr_3p, end5p, start3p = ltr_result
         fasta_str = (f">{full_header}\t5p:1-{end5p}\n{ltr_5p}\n"
@@ -953,7 +1066,7 @@ def process_dir(dir_path):
             aln_data = _run_align_mem(fasta_str, verbose)
         except subprocess.CalledProcessError:
             print(f"[SKIP] mafft failed for {dir_path.name}")
-            return
+            return (None, None)
 
         proposed_len, raw_bp = _read_aln_stats_str(aln_data)
 
@@ -961,7 +1074,7 @@ def process_dir(dir_path):
             clean_data = _run_trimal_mem(aln_data, verbose)
         except subprocess.CalledProcessError:
             print(f"[SKIP] trimal failed for {dir_path.name}")
-            return
+            return (None, None)
 
         clean_bp = _sum_ungapped_bp_str(clean_data)
 
@@ -974,7 +1087,7 @@ def process_dir(dir_path):
                 f"clean_bp({clean_bp}) + ext({extension}) <= "
                 f"{args.min_retained_fraction:.3f} * raw_bp({raw_bp:.0f})"
             )
-            return
+            return (None, None)
 
         # Adjust proposed LTR len by extension
         if proposed_len is None:
@@ -985,10 +1098,16 @@ def process_dir(dir_path):
             proposed_adj = max(proposed_len - ARGS.extension, 0)
 
         # Final WFA (in-memory via stdin)
-        return _run_wfa_and_filter(
+        result = _run_wfa_and_filter(
             clean_data, proposed_adj,
             args.mutation_rate, args.max_win_overdisp, verbose,
         )
+
+        consensus_record = None
+        if result is not None and getattr(ARGS, 'ltr_consensus', False) and not getattr(ARGS, 'wfa_align', False):
+            consensus_record = _build_consensus_from_trimmed(clean_data, full_header, verbose)
+
+        return (result, consensus_record)
 
     finally:
         # Always try to remove the subdir if purge_subdirs is enabled
@@ -1095,6 +1214,16 @@ def _progress_update(completed, total, start, last_update, update_interval):
     return last_update
 
 
+def _consensus_path_for_outfile(outfile: str) -> str:
+    """Derive consensus FASTA path from the divergence outfile path.
+    If outfile ends with '.results', replace it with '.consensus.fa'; otherwise append '.consensus.fa'.
+    """
+    p = Path(outfile)
+    if p.suffix == ".results":
+        return str(p.with_suffix(".consensus.fa"))
+    return f"{outfile}.consensus.fa"
+
+
 def process_one_input(args_base: argparse.Namespace, in_fasta: str, per_prefix_domains: dict, multi_mode: bool):
     """Process a single input FASTA using (possibly) matched domains mapping in multi-input mode."""
     global ARGS, DOMAINS, LOGFILE
@@ -1115,6 +1244,16 @@ def process_one_input(args_base: argparse.Namespace, in_fasta: str, per_prefix_d
     else:
         open(outfile, "w").close()
 
+    # Optional consensus FASTA output
+    consensus_outfile = None
+    if getattr(args_base, "ltr_consensus", False):
+        consensus_outfile = _consensus_path_for_outfile(outfile)
+        if args_base.reuse_existing and os.path.exists(consensus_outfile):
+            # mirror reuse semantics: keep existing records, append new ones
+            pass
+        else:
+            open(consensus_outfile, "w").close()
+
     # Pick matching domains mapping (None if absent)
     DOMAINS = per_prefix_domains.get(pref)
     if args_base.domains_tsvs and multi_mode and DOMAINS is None:
@@ -1124,6 +1263,7 @@ def process_one_input(args_base: argparse.Namespace, in_fasta: str, per_prefix_d
     ARGS = deepcopy(args_base)
     ARGS.temp_dir = temp_dir
     ARGS.outfile = outfile
+    ARGS.consensus_outfile = consensus_outfile
     ARGS.input_fasta = in_fasta
 
     log_path = outfile + ".log"
@@ -1148,6 +1288,8 @@ def process_one_input(args_base: argparse.Namespace, in_fasta: str, per_prefix_d
         shutil.rmtree(ARGS.temp_dir)
 
     print(f"All sequences processed for {pref}. Output in {ARGS.outfile}")
+    if consensus_outfile:
+        print(f"LTR consensus FASTA in {consensus_outfile}")
 
 
 def _process_unbatched(args, domains, log_path, in_fasta, pref):
@@ -1188,17 +1330,26 @@ def _process_unbatched(args, domains, log_path, in_fasta, pref):
     completed = 0
     print("", file=sys.stderr)
 
-    with open(args.outfile, "a") as outfh, Pool(
-        processes=args.threads,
-        initializer=_pool_init,
-        initargs=(args, domains, log_path),
-    ) as pool:
-        for result in pool.imap_unordered(process_dir, dirs, chunksize=1):
-            if result:
-                outfh.write(result)
-                outfh.flush()
-            completed += 1
-            last_update = _progress_update(completed, total, start, last_update, update_interval)
+    consensus_fh = open(args.consensus_outfile, "a") if args.consensus_outfile else None
+    try:
+        with open(args.outfile, "a") as outfh, Pool(
+            processes=args.threads,
+            initializer=_pool_init,
+            initargs=(args, domains, log_path),
+        ) as pool:
+            for result_tuple in pool.imap_unordered(process_dir, dirs, chunksize=1):
+                result_line, consensus_record = result_tuple
+                if result_line:
+                    outfh.write(result_line)
+                    outfh.flush()
+                if consensus_record and consensus_fh is not None:
+                    consensus_fh.write(consensus_record)
+                    consensus_fh.flush()
+                completed += 1
+                last_update = _progress_update(completed, total, start, last_update, update_interval)
+    finally:
+        if consensus_fh is not None:
+            consensus_fh.close()
 
     print("", file=sys.stderr)
 
@@ -1227,28 +1378,37 @@ def _process_batched(args, domains, log_path, in_fasta, pref):
     completed = 0
     print("", file=sys.stderr)
 
-    # Create pool once, reuse across all batches
-    with open(args.outfile, "a") as outfh, Pool(
-        processes=args.threads,
-        initializer=_pool_init,
-        initargs=(args, domains, log_path),
-    ) as pool:
-        # Process in batches
-        for batch_start in range(0, total, batch_size):
-            batch = entries[batch_start:batch_start + batch_size]
+    consensus_fh = open(args.consensus_outfile, "a") if args.consensus_outfile else None
+    try:
+        # Create pool once, reuse across all batches
+        with open(args.outfile, "a") as outfh, Pool(
+            processes=args.threads,
+            initializer=_pool_init,
+            initargs=(args, domains, log_path),
+        ) as pool:
+            # Process in batches
+            for batch_start in range(0, total, batch_size):
+                batch = entries[batch_start:batch_start + batch_size]
 
-            # Step 3a: Write only this batch's seq.fa files
-            write_batch(batch, args.input_fasta, args.temp_dir)
+                # Step 3a: Write only this batch's seq.fa files
+                write_batch(batch, args.input_fasta, args.temp_dir)
 
-            # Step 3b: Process this batch
-            batch_dirs = [str(Path(args.temp_dir) / e.safe_name) for e in batch]
-            for result in pool.imap_unordered(process_dir, batch_dirs, chunksize=1):
-                if result:
-                    outfh.write(result)
-                    outfh.flush()
-                completed += 1
-                last_update = _progress_update(completed, total, start, last_update, update_interval)
-            # purge_subdirs is active, so process_dir already removed each subdir
+                # Step 3b: Process this batch
+                batch_dirs = [str(Path(args.temp_dir) / e.safe_name) for e in batch]
+                for result_tuple in pool.imap_unordered(process_dir, batch_dirs, chunksize=1):
+                    result_line, consensus_record = result_tuple
+                    if result_line:
+                        outfh.write(result_line)
+                        outfh.flush()
+                    if consensus_record and consensus_fh is not None:
+                        consensus_fh.write(consensus_record)
+                        consensus_fh.flush()
+                    completed += 1
+                    last_update = _progress_update(completed, total, start, last_update, update_interval)
+                # purge_subdirs is active, so process_dir already removed each subdir
+    finally:
+        if consensus_fh is not None:
+            consensus_fh.close()
 
     print("", file=sys.stderr)
 
@@ -1387,6 +1547,17 @@ if __name__ == "__main__":
         )
     )
     parser.add_argument(
+        "--ltr-consensus", action="store_true", dest="ltr_consensus",
+        help=(
+            "Also write a FASTA of IUPAC consensus LTRs, one per input LTR-RT. "
+            "Pipeline: MAFFT -> trimal -> WFA realignment of trimmed LTRs -> IUPAC consensus. "
+            "FASTA headers match the input LTR-RT FASTA exactly. "
+            "Single-input output: <outfile>.consensus.fa (with .results suffix replaced). "
+            "Multi-input output: <prefix>.LTRs.alns.consensus.fa per input. "
+            "Not compatible with --wfa-align."
+        )
+    )
+    parser.add_argument(
         "-i", "--input-fastas",
         nargs="+", required=True,
         help="Path(s) to multi-sequence LTR-RT FASTA file(s)."
@@ -1401,6 +1572,11 @@ if __name__ == "__main__":
     # Enforce mutual exclusivity: keep_temp vs purge_subdirs
     if args.keep_temp and args.purge_subdirs:
         parser.error("Options -k/--keep_temp and --purge-subdirs are mutually exclusive.")
+
+    # Enforce mutual exclusivity: ltr_consensus vs wfa_align
+    if args.ltr_consensus and args.wfa_align:
+        parser.error("--ltr-consensus and --wfa-align are mutually exclusive: "
+                     "the consensus pipeline requires the initial alignment to be MAFFT.")
 
     # Multi-input mode check and warnings for -t/-o
     multi_mode = len(args.input_fastas) > 1

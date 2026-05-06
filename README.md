@@ -32,6 +32,11 @@ options:
                         Override duplicate-header safety fallback in fast path. Assumes all duplicate header tokens share the same LTR length
                         from the domains TSV. Use with caution.
   --no-plot             Disable plotting of results into kmer2ltr_density.pdf.
+  --ltr-consensus       Also write a FASTA of IUPAC consensus LTRs (one per input LTR-RT).
+                        Pipeline: MAFFT -> trimal -> WFA realignment of trimmed LTRs -> IUPAC consensus.
+                        Single-input output: <outfile>.consensus.fa (replacing .results).
+                        Multi-input output: <prefix>.LTRs.alns.consensus.fa per input.
+                        Not compatible with --wfa-align.
 + -i INPUT_FASTAS [INPUT_FASTAS ...], --input-fastas INPUT_FASTAS [INPUT_FASTAS ...]
                         Path(s) to multi-sequence LTR-RT FASTA file(s).
 ```
