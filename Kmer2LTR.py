@@ -1230,6 +1230,8 @@ def _run_mmseqs_cluster(consensus_fasta, threads: int, verbose: bool):
     only the *_cluster.tsv. Auxiliary outputs (*_all_seqs.fasta,
     *_rep_seq.fasta, and the mmseqs tmp dir) are deleted.
 
+    Current parameters cluster to lineage level (ie, lots of lumping). For clades and subclade level, just adjust --min-seq-id up (0.75 for sub-clade; 0.85 for recent bursts).
+
     Parameters were chosen via a large grid search benchmarked on Arabidopsis
     LTR annotations, with the goal of jointly minimizing:
       - singletons (single-copy clusters), and
