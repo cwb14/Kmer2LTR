@@ -230,7 +230,7 @@ def _run_trimal_mem(aln_str: str, verbose: bool) -> str:
             pass
 
 
-# ---- IUPAC consensus helpers (for optional --ltr-consensus output) ---- #
+# ---- IUPAC consensus helpers (for optional --ltr-cluster output) ---- #
 
 # Two-base IUPAC ambiguity codes.
 _IUPAC_PAIR = {
@@ -992,7 +992,7 @@ def try_fast_path(dir_path: Path, header_token: str, full_header: str, seq_len: 
     )
 
     consensus_record = None
-    if result is not None and getattr(ARGS, 'ltr_consensus', False) and not getattr(ARGS, 'wfa_align', False):
+    if result is not None and getattr(ARGS, 'ltr_cluster', False) and not getattr(ARGS, 'wfa_align', False):
         consensus_record = _build_consensus_from_trimmed(clean_data, full_header, ARGS.verbose)
 
     return (True, (result, consensus_record))
@@ -1104,7 +1104,7 @@ def process_dir(dir_path):
         )
 
         consensus_record = None
-        if result is not None and getattr(ARGS, 'ltr_consensus', False) and not getattr(ARGS, 'wfa_align', False):
+        if result is not None and getattr(ARGS, 'ltr_cluster', False) and not getattr(ARGS, 'wfa_align', False):
             consensus_record = _build_consensus_from_trimmed(clean_data, full_header, verbose)
 
         return (result, consensus_record)
@@ -1224,6 +1224,90 @@ def _consensus_path_for_outfile(outfile: str) -> str:
     return f"{outfile}.consensus.fa"
 
 
+def _run_mmseqs_cluster(consensus_fasta, threads: int, verbose: bool):
+    """
+    Cluster the IUPAC consensus LTR FASTA with mmseqs easy-cluster, retaining
+    only the *_cluster.tsv. Auxiliary outputs (*_all_seqs.fasta,
+    *_rep_seq.fasta, and the mmseqs tmp dir) are deleted.
+
+    Parameters were chosen via a large grid search benchmarked on Arabidopsis
+    LTR annotations, with the goal of jointly minimizing:
+      - singletons (single-copy clusters), and
+      - family mixing (e.g., a Tork co-clustering with an Ogre is a bad sign;
+        Tork co-clustering with Unknown is acceptable).
+
+    Findings from that grid search:
+      (1) mmseqs easy-cluster outperformed cd-hit-est and a custom wavefront
+          alignment + clustering pipeline. Wavefront also doesn't scale: it is
+          not feasible for species with more than ~2k LTR-RTs.
+      (2) The IUPAC consensus LTR FASTA (this pipeline's output) outperformed
+          both the full-length LTR-RT FASTA and a 5'-LTR-only FASTA as input
+          to mmseqs.
+    mmseqs is fast, so this step adds little to total runtime.
+
+    Returns the Path to <prefix>_cluster.tsv on success, or None if the
+    consensus FASTA is missing/empty, mmseqs is unavailable, or mmseqs fails.
+    """
+    consensus_fasta = Path(consensus_fasta)
+    if not consensus_fasta.exists() or consensus_fasta.stat().st_size == 0:
+        print(f"[CLUSTER] Consensus FASTA {consensus_fasta} is missing or empty; "
+              f"skipping mmseqs.")
+        return None
+
+    cluster_prefix = consensus_fasta.with_suffix("")  # strips final '.fa'
+    tmp_dir = Path(tempfile.mkdtemp(
+        prefix=f"{consensus_fasta.stem}_mmseqs_",
+        dir=str(consensus_fasta.parent),
+    ))
+
+    cmd = [
+        "mmseqs", "easy-cluster",
+        str(consensus_fasta), str(cluster_prefix), str(tmp_dir),
+        "--min-seq-id", "0.6",
+        "-c", "0.6",
+        "--cov-mode", "1",
+        "--cluster-mode", "1",
+        "--mask", "0",
+        "-s", "7.5",
+        "--threads", str(threads),
+    ]
+    if verbose:
+        print("Running:", " ".join(cmd))
+
+    try:
+        subprocess.run(
+            cmd,
+            stdout=(None if verbose else subprocess.DEVNULL),
+            stderr=(None if verbose else subprocess.DEVNULL),
+            check=True,
+        )
+    except FileNotFoundError:
+        print("[CLUSTER] mmseqs not found in PATH; cannot cluster consensus LTRs.",
+              file=sys.stderr)
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return None
+    except subprocess.CalledProcessError as exc:
+        print(f"[CLUSTER] mmseqs easy-cluster failed (exit {exc.returncode}).",
+              file=sys.stderr)
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return None
+
+    shutil.rmtree(tmp_dir, ignore_errors=True)
+    for ext in ("_all_seqs.fasta", "_rep_seq.fasta"):
+        aux = Path(f"{cluster_prefix}{ext}")
+        try:
+            aux.unlink()
+        except FileNotFoundError:
+            pass
+
+    cluster_tsv = Path(f"{cluster_prefix}_cluster.tsv")
+    if not cluster_tsv.exists():
+        print(f"[CLUSTER] Expected cluster TSV not found: {cluster_tsv}",
+              file=sys.stderr)
+        return None
+    return cluster_tsv
+
+
 def process_one_input(args_base: argparse.Namespace, in_fasta: str, per_prefix_domains: dict, multi_mode: bool):
     """Process a single input FASTA using (possibly) matched domains mapping in multi-input mode."""
     global ARGS, DOMAINS, LOGFILE
@@ -1246,7 +1330,7 @@ def process_one_input(args_base: argparse.Namespace, in_fasta: str, per_prefix_d
 
     # Optional consensus FASTA output
     consensus_outfile = None
-    if getattr(args_base, "ltr_consensus", False):
+    if getattr(args_base, "ltr_cluster", False):
         consensus_outfile = _consensus_path_for_outfile(outfile)
         if args_base.reuse_existing and os.path.exists(consensus_outfile):
             # mirror reuse semantics: keep existing records, append new ones
@@ -1290,6 +1374,11 @@ def process_one_input(args_base: argparse.Namespace, in_fasta: str, per_prefix_d
     print(f"All sequences processed for {pref}. Output in {ARGS.outfile}")
     if consensus_outfile:
         print(f"LTR consensus FASTA in {consensus_outfile}")
+        cluster_tsv = _run_mmseqs_cluster(
+            consensus_outfile, args_base.threads, args_base.verbose
+        )
+        if cluster_tsv:
+            print(f"LTR cluster TSV in {cluster_tsv}")
 
 
 def _process_unbatched(args, domains, log_path, in_fasta, pref):
@@ -1518,13 +1607,21 @@ if __name__ == "__main__":
             "Maximum allowed window overdispersion (win_overdisp). "
             "Lower values are more specific (aggressive filtering), "
             "higher values are more sensitive (retains more outputs). "
+            "To disable this filter entirely, pass a very large value "
+            "(e.g. 'inf' or 1e9). "
             "Default: 6."
         )
     )
 
     parser.add_argument(
         "--min-retained-fraction", type=float, default=0.6, dest="min_retained_fraction",
-        help="Minimum fraction of ungapped columns retained after trimming required to proceed (default: 0.6)."
+        help=(
+            "Minimum fraction of ungapped columns retained after trimming required to proceed. "
+            "Higher values are more specific (aggressive filtering), "
+            "lower values are more sensitive (retains more outputs). "
+            "To disable this filter entirely, pass 0. "
+            "Default: 0.6."
+        )
     )
     parser.add_argument(
         "--assume-duplicate-same-ltr", action="store_true", dest="assume_dup_same_ltr",
@@ -1547,14 +1644,20 @@ if __name__ == "__main__":
         )
     )
     parser.add_argument(
-        "--ltr-consensus", action="store_true", dest="ltr_consensus",
+        "--ltr-cluster", action="store_true", dest="ltr_cluster",
         help=(
-            "Also write a FASTA of IUPAC consensus LTRs, one per input LTR-RT. "
-            "Pipeline: MAFFT -> trimal -> WFA realignment of trimmed LTRs -> IUPAC consensus. "
-            "FASTA headers match the input LTR-RT FASTA exactly. "
-            "Single-input output: <outfile>.consensus.fa (with .results suffix replaced). "
-            "Multi-input output: <prefix>.LTRs.alns.consensus.fa per input. "
-            "Not compatible with --wfa-align."
+            "Build a FASTA of IUPAC consensus LTRs (one per input LTR-RT) AND cluster "
+            "them with mmseqs easy-cluster. "
+            "Consensus pipeline: MAFFT -> trimal -> WFA realignment of trimmed LTRs -> "
+            "IUPAC consensus; headers match the input LTR-RT FASTA exactly. "
+            "Clustering parameters were chosen via a large grid search benchmarked on "
+            "Arabidopsis LTR annotations to jointly minimize singletons and "
+            "cross-family clusters. "
+            "Single-input outputs: <outfile>.consensus.fa and "
+            "<outfile>.consensus_cluster.tsv (with .results replaced). "
+            "Multi-input outputs: <prefix>.LTRs.alns.consensus.fa and "
+            "<prefix>.LTRs.alns.consensus_cluster.tsv per input. "
+            "Requires mmseqs in PATH. Not compatible with --wfa-align."
         )
     )
     parser.add_argument(
@@ -1573,10 +1676,15 @@ if __name__ == "__main__":
     if args.keep_temp and args.purge_subdirs:
         parser.error("Options -k/--keep_temp and --purge-subdirs are mutually exclusive.")
 
-    # Enforce mutual exclusivity: ltr_consensus vs wfa_align
-    if args.ltr_consensus and args.wfa_align:
-        parser.error("--ltr-consensus and --wfa-align are mutually exclusive: "
-                     "the consensus pipeline requires the initial alignment to be MAFFT.")
+    # Enforce mutual exclusivity: ltr_cluster vs wfa_align
+    if args.ltr_cluster and args.wfa_align:
+        parser.error("--ltr-cluster and --wfa-align are mutually exclusive: "
+                     "the consensus + clustering pipeline requires the initial alignment to be MAFFT.")
+
+    # --ltr-cluster shells out to mmseqs; fail fast if it isn't installed.
+    if args.ltr_cluster and shutil.which("mmseqs") is None:
+        parser.error("--ltr-cluster requires mmseqs in PATH; "
+                     "install (e.g. 'mamba install -c bioconda mmseqs2') and retry.")
 
     # Multi-input mode check and warnings for -t/-o
     multi_mode = len(args.input_fastas) > 1

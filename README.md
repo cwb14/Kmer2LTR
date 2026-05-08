@@ -25,18 +25,27 @@ options:
                         supply multiple TSVs; each TSV is matched to an input by prefix. Matching uses the TSV filename up to the first '.'; if
                         it ends with '_domains', that suffix is ignored for matching.
   --max-win-overdisp MAX_WIN_OVERDISP
-                        If set, exclude alignments with window overdispersion (win_overdisp) greater than this value.
+                        Exclude alignments with window overdispersion (win_overdisp) greater than this value.
+                        Lower = stricter, higher = more permissive. Pass a very large value (e.g. `inf` or `1e9`)
+                        to disable. Default: 6.
   --min-retained-fraction MIN_RETAINED_FRACTION
-                        Minimum fraction of ungapped columns retained after trimming required to proceed (default: 0.6).
+                        Minimum fraction of ungapped columns retained after trimming required to proceed.
+                        Higher = stricter, lower = more permissive. Pass `0` to disable. Default: 0.6.
   --assume-duplicate-same-ltr
                         Override duplicate-header safety fallback in fast path. Assumes all duplicate header tokens share the same LTR length
                         from the domains TSV. Use with caution.
   --no-plot             Disable plotting of results into kmer2ltr_density.pdf.
-  --ltr-consensus       Also write a FASTA of IUPAC consensus LTRs (one per input LTR-RT).
-                        Pipeline: MAFFT -> trimal -> WFA realignment of trimmed LTRs -> IUPAC consensus.
-                        Single-input output: <outfile>.consensus.fa (replacing .results).
-                        Multi-input output: <prefix>.LTRs.alns.consensus.fa per input.
-                        Not compatible with --wfa-align.
+  --ltr-cluster         Build a FASTA of IUPAC consensus LTRs (one per input LTR-RT) AND cluster
+                        them with mmseqs easy-cluster. Consensus pipeline: MAFFT -> trimal ->
+                        WFA realignment of trimmed LTRs -> IUPAC consensus. Clustering parameters
+                        were chosen via grid search on Arabidopsis LTR annotations to jointly
+                        minimize singletons and cross-family clusters; mmseqs easy-cluster beat
+                        cd-hit-est and a wavefront-based pipeline (which doesn't scale past ~2k
+                        LTR-RTs anyway). Consensus LTR FASTA also outperformed full-length LTR-RT
+                        FASTA and 5'-LTR-only FASTA as the clustering input.
+                        Single-input outputs: <outfile>.consensus.fa and <outfile>.consensus_cluster.tsv.
+                        Multi-input outputs: <prefix>.LTRs.alns.consensus.fa and <prefix>.LTRs.alns.consensus_cluster.tsv per input.
+                        Requires mmseqs in PATH. Not compatible with --wfa-align.
 + -i INPUT_FASTAS [INPUT_FASTAS ...], --input-fastas INPUT_FASTAS [INPUT_FASTAS ...]
                         Path(s) to multi-sequence LTR-RT FASTA file(s).
 ```
