@@ -20,7 +20,6 @@ q = shlex.quote
 MIN_SEQ_BP = 80
 SCRIPT_DIR = Path(__file__).parent.resolve()
 
-
 # Problems to address later:
 #  1. Indel-induced offset drift. The current algorithm bins LTR-LTR pairs at 24 bp offset resolution and keeps a single bin. Indels in the LTR-vs-LTR alignment shift downstream pairs' offsets out of that
 #  bin, so middle-LTR pairs get filtered (the dumbbell pattern). Heavily diverged LTR-RTs lose enough pairs to fail qualification entirely.
@@ -37,6 +36,9 @@ SCRIPT_DIR = Path(__file__).parent.resolve()
 #  plot's edges — the input is no longer assumed to BE the LTR-RT; it's a search space within which the LTR-RT is geometrically located.
 #  Formally: line-segment detection on a sparse 2D point cloud — same problem family as Hough-transform line detection, RANSAC line fitting, or collinear seed chaining in long-read aligners (minimap2,
 #  LASTZ).
+#  We need a homology detector that doesn't presume where the homologous regions sit within the input. Find the longest contiguous chain of evidence that "these two regions are duplicates of each
+#  other"; report the chain's endpoints as the LTR boundaries, the chain's offset(s) as the inter-LTR spacing, and the gaps between chain endpoints and input edges as flank size. Three useful numbers, one
+#  geometric measurement, no input assumptions.
 
 # ---------------- WFA binary selection with fallback ---------------- #
 # Tries wfa_linux1 first, then wfa_linux2. If both fail, instruct compile.
