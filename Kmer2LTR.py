@@ -21,6 +21,23 @@ MIN_SEQ_BP = 80
 SCRIPT_DIR = Path(__file__).parent.resolve()
 
 
+# Problems to address later:
+#  1. Indel-induced offset drift. The current algorithm bins LTR-LTR pairs at 24 bp offset resolution and keeps a single bin. Indels in the LTR-vs-LTR alignment shift downstream pairs' offsets out of that
+#  bin, so middle-LTR pairs get filtered (the dumbbell pattern). Heavily diverged LTR-RTs lose enough pairs to fail qualification entirely.
+#  2. Silent flank contamination. The boundary call anchors the extract at positions 0 and seq_len, assuming the input IS the LTR-RT. Flanks ≤ 100 bp pass the termini-reach test and get silently glued onto
+#   the extracts, contaminating downstream MAFFT alignment and inflating divergence estimates.
+#  Both share a root cause: the algorithm searches for the LTR in 1D (an offset bucket) and assumes a property of the input (clean LTR-RT, no flank) that may not hold.
+#  The reframe.
+#  The LTR-LTR signal is a 2D geometric feature — pairs forming a collinear line segment in (s1, s2) space with slope ≈ 1. Non-LTR noise is scattered with no collinear structure. Detect the segment, and
+#  three useful numbers fall out of its geometry:
+#  - LTR boundaries within the input = the segment's endpoints in (s1, s2).
+#  - Inter-LTR spacing = the segment's offset (s2 − s1), now a measured property rather than a search parameter.
+#  - Flank size = the gap between the segment's endpoints and the plot's corners.
+#  Indels become small steps in offset along the segment — still collinear, still continuous in (s1, s2), still part of the same LTR signal. Overextension becomes a visible inset of the segment from the
+#  plot's edges — the input is no longer assumed to BE the LTR-RT; it's a search space within which the LTR-RT is geometrically located.
+#  Formally: line-segment detection on a sparse 2D point cloud — same problem family as Hough-transform line detection, RANSAC line fitting, or collinear seed chaining in long-read aligners (minimap2,
+#  LASTZ).
+
 # ---------------- WFA binary selection with fallback ---------------- #
 # Tries wfa_linux1 first, then wfa_linux2. If both fail, instruct compile.
 
