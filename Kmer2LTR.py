@@ -20,25 +20,6 @@ q = shlex.quote
 MIN_SEQ_BP = 80
 SCRIPT_DIR = Path(__file__).parent.resolve()
 
-# Problems to address later:
-#  1. Indel-induced offset drift. The current algorithm bins LTR-LTR pairs at 24 bp offset resolution and keeps a single bin. Indels in the LTR-vs-LTR alignment shift downstream pairs' offsets out of that
-#  bin, so middle-LTR pairs get filtered (the dumbbell pattern). Heavily diverged LTR-RTs lose enough pairs to fail qualification entirely.
-#  2. Silent flank contamination. The boundary call anchors the extract at positions 0 and seq_len, assuming the input IS the LTR-RT. Flanks ≤ 100 bp pass the termini-reach test and get silently glued onto
-#   the extracts, contaminating downstream MAFFT alignment and inflating divergence estimates.
-#  Both share a root cause: the algorithm searches for the LTR in 1D (an offset bucket) and assumes a property of the input (clean LTR-RT, no flank) that may not hold.
-#  The reframe.
-#  The LTR-LTR signal is a 2D geometric feature — pairs forming a collinear line segment in (s1, s2) space with slope ≈ 1. Non-LTR noise is scattered with no collinear structure. Detect the segment, and
-#  three useful numbers fall out of its geometry:
-#  - LTR boundaries within the input = the segment's endpoints in (s1, s2).
-#  - Inter-LTR spacing = the segment's offset (s2 − s1), now a measured property rather than a search parameter.
-#  - Flank size = the gap between the segment's endpoints and the plot's corners.
-#  Indels become small steps in offset along the segment — still collinear, still continuous in (s1, s2), still part of the same LTR signal. Overextension becomes a visible inset of the segment from the
-#  plot's edges — the input is no longer assumed to BE the LTR-RT; it's a search space within which the LTR-RT is geometrically located.
-#  Formally: line-segment detection on a sparse 2D point cloud — same problem family as Hough-transform line detection, RANSAC line fitting, or collinear seed chaining in long-read aligners (minimap2,
-#  LASTZ).
-#  We need a homology detector that doesn't presume where the homologous regions sit within the input. Find the longest contiguous chain of evidence that "these two regions are duplicates of each
-#  other"; report the chain's endpoints as the LTR boundaries, the chain's offset(s) as the inter-LTR spacing, and the gaps between chain endpoints and input edges as flank size. Three useful numbers, one
-#  geometric measurement, no input assumptions.
 
 # ---------------- WFA binary selection with fallback ---------------- #
 # Tries wfa_linux1 first, then wfa_linux2. If both fail, instruct compile.
@@ -922,112 +903,208 @@ def _lis_indices(values):
     return result
 
 
-# Maximum number of occurrences for a kmer to be considered informative.
-# Above this, the kmer is likely low-complexity / microsatellite.
-_MAX_KMER_OCCURRENCES = 10
+# Kmer-occurrence handling. A kmer occurring N times across the input emits
+# O(N^2) cross-half pairs, so the cap both bounds that blow-up and screens
+# microsatellite/low-complexity noise. The OLD cap of 10 was far too
+# aggressive: young (near-identical) LTR-RTs that are short and repetitive
+# have *every* shared kmer occur >10x, so the real LTR signal was filtered to
+# zero pairs and the element was rejected outright (56/254 of the no-domains
+# rejections were exactly this -- LTR copies ~99% identical, 0 pairs kept).
+# 40 keeps that signal; on real data it barely changes pair counts even for
+# 20+ kb elements. If a sequence still yields no pairs we escalate through
+# _KMER_ESCALATION before giving up.
+_MAX_KMER_OCCURRENCES = 40
+# Hard ceiling on pairs emitted by a single kmer: O(N^2) safety valve for
+# pathological low-complexity input. Does not bind on normal LTR-RTs.
+_MAX_PAIRS_PER_KMER = 400
+# Progressive relaxations tried, in order, when the default params yield no
+# cross-half kmer pairs: (kmin_override, max_occ_override). Lower kmin
+# survives higher LTR divergence; higher cap survives repetitive short LTRs.
+_KMER_ESCALATION = ((6, 60), (5, 120))
 
-# Minimum number of collinear pairs after LIS to trust the boundary call.
+# Collinear-support threshold separating the two boundary-call tiers:
+#   >= this many LIS pairs -> trust the per-position percentile boundary.
+#   <  this many           -> fall back to the offset-implied LTR length
+#                             (the same symmetric cut the --domains fast path
+#                             uses). NEITHER tier rejects the sequence, so the
+#                             non-fast path no longer returns None for a real
+#                             LTR-RT and emits exactly one line per input,
+#                             matching the fast path's line count.
 _MIN_LIS_PAIRS = 20
 
-# Diagonal-filter defaults. bin_width must be wide enough to absorb
-# divergence-induced offset jitter on a single diagonal -- a few-bp indel in
-# the LTR alignment shifts s2-s1 by that many bp, so a single true diagonal
-# typically spans 5-15 bp of offset. Setting bin_width too small splits the
-# true diagonal across adjacent bins, neither of which then passes the
-# termini-reach test individually. 24 bp gives comfortable headroom while
-# still cleanly separating diagonals from spurious neighbors.
-#
-# The termini-reach test uses the SMALLER of (frac * seq_len, hard-bp-cap).
-# For short inputs (~500 bp) the fractional gap dominates (46 bp at frac=0.10);
-# for long inputs (~15 kb) the fractional gap (1.5 kb) is much larger than
-# typical LTRs (100-2000 bp), letting LTR-internal cross-match diagonals pass
-# as "reaching the terminus" -- the bp cap stops that. 100 bp is generous
-# enough to absorb boundary kmer dropout from divergence/indels at LTR ends.
+# Conservative implied-LTR cap used only by the absolute last-resort boundary
+# (no kmer signal at all even after escalation -- expected ~never).
+_FALLBACK_LTR_CAP_BP = 600
+
+# Diagonal-detection geometry. Offsets (s2 - s1) are histogrammed at
+# _DIAG_BIN_WIDTH resolution, but a single true LTR<->LTR diagonal is NOT
+# confined to one bin: indels in the LTR-vs-LTR alignment make the offset
+# drift smoothly along the diagonal (40-60 bp of drift observed on real
+# rejected elements). _DIAG_DRIFT_BP is the half-width of the offset band
+# merged around a candidate bin so an indel-fragmented diagonal is scored
+# and chained as ONE diagonal instead of being split below threshold.
 _DIAG_BIN_WIDTH = 24
+_DIAG_DRIFT_BP = 72
+# Minimum merged-band support for an offset to be a *preferred* candidate.
+# If none clear it, the best-supported physically-valid offset is still
+# returned (no terminus-reach assumption; no outright rejection).
 _DIAG_MIN_PAIRS_PER_BIN = 5
-_DIAG_TERMINUS_GAP_FRAC = 0.10
-_DIAG_TERMINUS_GAP_MAX_BP = 100
+# A true LTR-RT has its two LTRs at the element termini, so the true
+# LTR<->LTR diagonal has the LARGEST offset (s2-s1 = seq_len - LTR_len, with
+# LTR < seq_len/2); internal-repeat diagonals sit at SMALLER offsets and
+# scattered coincidences form no collinear chain. The discriminator for "real
+# LTR diagonal" is therefore the length of the COLLINEAR chain (tight-band
+# LIS), not raw pair count: pair count is inflated by dense internal repeats
+# and starves genuine short LTRs. Among offsets whose tight-band LIS is at
+# least _DIAG_LIS_FRAC of the strongest chain's (absolute floor
+# _DIAG_MIN_LIS_FLOOR to kill high-offset flukes), the LARGEST offset is the
+# true LTR diagonal. On the hard recovered set this located the LTR within
+# 80 bp 110/149 times (mean err 80 bp) vs 93/149 (mean 152) for the
+# density-weighted score, while also tightening the easy set (mean 19 vs 37).
+_DIAG_LIS_FRAC = 0.25
+_DIAG_MIN_LIS_FLOOR = 10
+# The wide drift band is used ONLY to *select* the offset robustly (so an
+# indel-fragmented diagonal is never rejected). The pairs fed to LIS and the
+# percentile boundary are then restricted to this TIGHT half-width around the
+# chosen offset: the wide band also admits a parallel internal-repeat
+# sub-diagonal, and letting those into the percentile makes it grab outliers
+# and over-extract (true 100 bp LTR -> 1.4 kb extract observed). Tight here
+# means clean diagonals still clear LIS>=_MIN_LIS_PAIRS (no regression on the
+# elements that already worked) while noisy recovered ones correctly fall to
+# the offset-implied tier.
+_DIAG_TIGHT_BP = _DIAG_BIN_WIDTH
 
 
 def _pick_ltr_diagonal(all_mapped, seq_len,
                        bin_width=_DIAG_BIN_WIDTH,
-                       min_pairs_per_bin=_DIAG_MIN_PAIRS_PER_BIN,
-                       max_terminus_gap_frac=_DIAG_TERMINUS_GAP_FRAC,
-                       max_terminus_gap_bp=_DIAG_TERMINUS_GAP_MAX_BP):
+                       drift_bp=_DIAG_DRIFT_BP,
+                       min_pairs_per_bin=_DIAG_MIN_PAIRS_PER_BIN):
     """
-    Pick the kmer-pair subset on the LTR-RT 5'LTR<->3'LTR dot-plot diagonal.
+    Pick the kmer-pair subset lying on the LTR-RT 5'LTR<->3'LTR dot-plot
+    diagonal, tolerant to indel-induced offset drift.
 
-    Why: LIS on s2 alone finds the LONGEST monotonic kmer-pair set, which on
-    internally repetitive LTR-RTs is often a spurious diagonal (internal-region
-    repeat phase) rather than the true LTR<->LTR diagonal. Restricting to a
-    single diagonal before LIS fixes the boundary call.
+    Why a diagonal pre-filter at all: LIS on s2 alone returns the LONGEST
+    monotone kmer-pair chain, which on internally repetitive LTR-RTs is often
+    a spurious internal-repeat diagonal rather than the true LTR<->LTR one.
+    Restricting to one diagonal before LIS fixes the boundary call.
 
-    Selection:
-      1. Histogram offsets (s2 - s1) at `bin_width` resolution.
-      2. Keep bins with >= `min_pairs_per_bin` pairs AND with some pair whose
-         s1 is within `max_terminus_gap_frac * seq_len` of the 5' end AND some
-         pair whose s2 is within the same fraction of the 3' end. This rejects
-         internal-region repeat diagonals (which sit in the middle of the
-         input and don't touch the termini).
-      3. Reject bins whose implied LTR length exceeds seq_len/2 (the LTRs
-         can't overlap -- this rejects internal-overlap diagonals that the
-         downstream pipeline would have to cap to seq_len/2 anyway).
-      4. Among survivors, pick the diagonal with the highest density-weighted
-         score: pairs^2 / implied_LTR_len. Equivalent to (pair count) x
-         (pair density along the diagonal). Balances raw count and
-         concentration: a fat, sparse "diagonal" (often a shift artifact
-         or LTR-internal cross-match that spans more of the input than the
-         true LTR) loses to a dense, narrow LTR-LTR diagonal of the right
-         width. The TRUE LTR<->LTR diagonal has pairs at every position
-         within the LTR (high density) AND covers the LTR length
-         (substantial count) -- it dominates this score among physically
-         valid candidates.
+    Why drift tolerance: a single true diagonal is NOT one offset. Indels in
+    the (implicit) LTR-vs-LTR alignment step the offset s2 - s1 by a few bp
+    each, so the true diagonal smears across a band of offsets (40-60 bp of
+    drift seen on real elements). The PREVIOUS version kept exactly one
+    bin_width-wide bin and additionally required a pair within a fixed bp of
+    *both physical termini*; indel-drifted diagonals and diverged/short LTRs
+    whose shared kmers sit in the LTR interior were rejected outright (198 of
+    the 254 no-domains rejections). This version sums support over a merged
+    band [b - drift, b + bin_width + drift) and makes NO physical-terminus
+    assumption.
 
-    Returns (keep_indices, chosen_offset_bin) or None if no diagonal qualifies.
-    Indices are positions in `all_mapped`.
+    Selection among physically valid offsets (implied LTR seq_len - offset
+    does not force the two LTRs to overlap): for each offset compute the
+    length of the collinear chain (tight-band LIS) and take the LARGEST
+    offset whose chain is at least _DIAG_LIS_FRAC of the strongest chain
+    (absolute floor _DIAG_MIN_LIS_FLOOR), ties broken by chain length. This
+    matches LTR-RT geometry -- the LTRs sit at the element termini so the
+    true diagonal is the highest-offset diagonal that forms a real collinear
+    chain, while internal repeats sit at smaller offsets and coincidences
+    form no chain. Chain length, not raw pair count, is the discriminator:
+    raw count is inflated by dense internal repeats and starves genuine
+    short LTRs (located the LTR within 80 bp on 110/149 of the hard
+    recovered set vs 93/149 for a density-weighted pair-count score).
+
+    Never returns None when all_mapped is non-empty: if no offset clears
+    `min_pairs_per_bin`, the best-supported physically-valid offset is still
+    returned so the caller can always produce a boundary (exact line-count
+    parity with the --domains fast path). Returns (keep_indices,
+    chosen_offset); indices are positions in `all_mapped`.
     """
     if not all_mapped:
         return None
 
-    by_bin = {}
-    for idx, p in enumerate(all_mapped):
-        s1, _, s2, _ = p
-        b = ((s2 - s1) // bin_width) * bin_width
-        by_bin.setdefault(b, []).append(idx)
+    from collections import Counter
+    offsets = [(p[2] - p[0]) for p in all_mapped]
+    bin_counts = Counter((o // bin_width) * bin_width for o in offsets)
 
-    gap = min(max_terminus_gap_frac * seq_len, max_terminus_gap_bp)
-    near_start = gap
-    near_end = seq_len - gap
+    def band_count(center):
+        lo = center - drift_bp
+        hi = center + bin_width + drift_bp
+        return sum(c for b, c in bin_counts.items() if lo <= b < hi)
 
-    candidates = []
-    for b, indices in by_bin.items():
-        if len(indices) < min_pairs_per_bin:
-            continue
+    cand = []  # (band_support, offset_bin, implied_ltr), physically valid
+    for b in bin_counts:
         implied_ltr = seq_len - b
-        # Non-overlap: the two LTRs together must fit in the input.
-        if 2 * implied_ltr > seq_len:
+        # Non-overlap: offset too small => the two LTRs would overlap; that is
+        # an internal-overlap diagonal, not an LTR<->LTR one. (No rejected
+        # real element in the test set lands here.)
+        if implied_ltr <= 0 or 2 * implied_ltr > seq_len:
             continue
-        s1_min = min(all_mapped[i][0] for i in indices)
-        s1_max = max(all_mapped[i][1] for i in indices)
-        s2_max = max(all_mapped[i][3] for i in indices)
-        if s1_min > near_start or s2_max < near_end:
-            continue
-        n = len(indices)
-        s1_span = s1_max - s1_min
-        score = (n * n) / implied_ltr  # pairs^2 / implied_LTR
-        candidates.append((score, n, s1_span, b, indices))
+        cand.append((band_count(b), b, implied_ltr))
 
-    if not candidates:
-        return None
+    if cand:
+        # Collinear-chain (tight-band LIS) per candidate offset. Pre-sort
+        # pairs by offset so each tight band is a contiguous slice (bisect),
+        # keeping this O(N log N) instead of O(N * candidates).
+        import bisect
+        order = sorted(range(len(all_mapped)), key=lambda i: offsets[i])
+        off_sorted = [offsets[i] for i in order]
+        pairs_sorted = [all_mapped[i] for i in order]
 
-    # Highest density-weighted score wins; pair count and span as tiebreakers.
-    candidates.sort(key=lambda c: (c[0], c[1], c[2]), reverse=True)
-    best_bin = candidates[0][3]
+        def tight_lis(center):
+            lo_i = bisect.bisect_left(off_sorted, center - _DIAG_TIGHT_BP)
+            hi_i = bisect.bisect_right(off_sorted, center + _DIAG_TIGHT_BP)
+            sub = sorted(pairs_sorted[lo_i:hi_i], key=lambda x: (x[0], x[2]))
+            if not sub:
+                return 0
+            return len(_lis_indices([p[2] for p in sub]))
 
-    lo = best_bin
-    hi = best_bin + bin_width
-    keep = [i for i, p in enumerate(all_mapped) if lo <= (p[2] - p[0]) < hi]
-    return keep, best_bin
+        # Cheap prefilter: a band below min_pairs_per_bin can't host a
+        # meaningful chain, so don't pay LIS for it.
+        prefilter = [c for c in cand if c[0] >= min_pairs_per_bin] or cand
+        lis_of = {c[1]: tight_lis(c[1]) for c in prefilter}
+        best_lis = max(lis_of.values()) if lis_of else 0
+        floor = max(_DIAG_MIN_LIS_FLOOR, _DIAG_LIS_FRAC * best_lis)
+        strong = [c for c in prefilter if lis_of[c[1]] >= floor] or prefilter
+        # Largest offset (= smallest implied LTR; the LTRs sit at the element
+        # termini) wins; the longer collinear chain breaks ties.
+        best_off = max(strong, key=lambda c: (c[1], lis_of[c[1]]))[1]
+    else:
+        # Every offset implies overlapping LTRs (degenerate); fall back to the
+        # largest observed offset so the caller still gets a boundary.
+        best_off = max(offsets)
+
+    lo = best_off - drift_bp
+    hi = best_off + bin_width + drift_bp
+    keep = [i for i, o in enumerate(offsets) if lo <= o < hi]
+    return keep, best_off
+
+
+def _fallback_boundary(seq, seq_len, extension, debug_dir, reason):
+    """
+    Absolute last-resort boundary: emit a conservative symmetric cut so the
+    element still appears in the output even with no usable kmer signal at
+    all (guarantees exact line-count parity with the --domains fast path).
+    Expected to fire ~never once the kmer cap is relaxed + escalated; logged
+    loudly via log_msg when it does so the user can spot it.
+
+    Returns the same 4-tuple as _discover_and_extract_ltrs:
+        (ltr_5p, ltr_3p, end5p, start3p), 1-based.
+    """
+    implied_ltr = min(seq_len // 4, _FALLBACK_LTR_CAP_BP)
+    final_len = max(1, min(seq_len // 2, implied_ltr + extension))
+    log_msg(f"[FALLBACK] No usable kmer signal ({reason}); emitting "
+            f"conservative symmetric cut LTR~{implied_ltr}+ext{extension} "
+            f"(seq_len={seq_len}).")
+    if debug_dir is not None:
+        _debug_log(debug_dir,
+                   f"[FULL] last-resort boundary ({reason}): "
+                   f"implied_ltr={implied_ltr} final_len={final_len}")
+        _debug_write(debug_dir, "03_ltr_boundaries.txt",
+                     f"# LAST-RESORT fallback ({reason})\n"
+                     f"sequence_length\t{seq_len}\n"
+                     f"final_5p_length\t{final_len}\n"
+                     f"final_3p_length\t{final_len}\n")
+    return (seq[0:final_len], seq[seq_len - final_len:],
+            final_len, seq_len - final_len + 1)
 
 
 def _discover_and_extract_ltrs(seq, kmin, kmax, dist, std_factor, extension, debug_dir=None):
@@ -1046,84 +1123,106 @@ def _discover_and_extract_ltrs(seq, kmin, kmax, dist, std_factor, extension, deb
     half_len = seq_len // 2
 
     # --- Kmer discovery + position mapping (replaces jellyfish + map_kmers) ---
-    # Kmers appearing up to _MAX_KMER_OCCURRENCES times are kept; all valid
-    # cross-half pairs are generated.  LIS resolves ambiguity downstream.
-    all_mapped = []  # (start1, end1, start2, end2) all 1-based
-    all_mapped_k = []  # parallel list of kmer sizes for debug output only
-    for k in range(kmin, kmax + 1):
-        kmer_positions = {}
-        for i in range(seq_len - k + 1):
-            kmer = seq_upper[i:i + k]
-            if kmer in kmer_positions:
-                kmer_positions[kmer].append(i)
-            else:
-                kmer_positions[kmer] = [i]
+    # All valid cross-half pairs are generated; the diagonal filter + LIS
+    # resolve ambiguity downstream. A kmer occurring N times emits O(N^2)
+    # pairs, so kmers above max_occ are dropped (low-complexity) and each
+    # kmer is additionally capped at _MAX_PAIRS_PER_KMER. If the default
+    # params yield zero pairs (short, repetitive, near-identical LTRs whose
+    # every shared kmer exceeds the occurrence cap) we escalate through
+    # _KMER_ESCALATION before deferring to the last-resort boundary -- this
+    # alone recovers every element the old hard cap of 10 filtered to nothing.
+    def _collect_pairs(kmin_, max_occ):
+        mapped, mapped_k = [], []
+        for k in range(kmin_, kmax + 1):
+            kmer_positions = {}
+            for i in range(seq_len - k + 1):
+                kmer_positions.setdefault(seq_upper[i:i + k], []).append(i)
+            for positions in kmer_positions.values():
+                if len(positions) < 2 or len(positions) > max_occ:
+                    continue
+                first_half = [p for p in positions if p + 1 <= half_len]
+                second_half = [p for p in positions if p + 1 > half_len]
+                if len(first_half) * len(second_half) > _MAX_PAIRS_PER_KMER:
+                    continue  # O(N^2) safety valve for low-complexity kmers
+                for pos1 in first_half:
+                    for pos2 in second_half:
+                        if pos2 - pos1 < dist:
+                            continue
+                        mapped.append((pos1 + 1, pos1 + k, pos2 + 1, pos2 + k))
+                        if debug_dir is not None:
+                            mapped_k.append(k)
+        return mapped, mapped_k
 
-        for positions in kmer_positions.values():
-            if len(positions) < 2 or len(positions) > _MAX_KMER_OCCURRENCES:
-                continue
-            # Generate all valid (first-half, second-half) pairs
-            first_half = [p for p in positions if p + 1 <= half_len]
-            second_half = [p for p in positions if p + 1 > half_len]
-            for pos1 in first_half:
-                for pos2 in second_half:
-                    if pos2 - pos1 < dist:
-                        continue
-                    s1 = pos1 + 1  # 1-based
-                    s2 = pos2 + 1
-                    all_mapped.append((s1, pos1 + k, s2, pos2 + k))
-                    if debug_dir is not None:
-                        all_mapped_k.append(k)
+    all_mapped, all_mapped_k = _collect_pairs(kmin, _MAX_KMER_OCCURRENCES)
+    escalation_note = None
+    if not all_mapped:
+        for esc_kmin, esc_occ in _KMER_ESCALATION:
+            all_mapped, all_mapped_k = _collect_pairs(min(esc_kmin, kmin), esc_occ)
+            if all_mapped:
+                escalation_note = f"kmin={min(esc_kmin, kmin)} max_occ={esc_occ}"
+                break
 
     if debug_dir is not None:
         rows = ["# all cross-half kmer pairs (1-based, inclusive)\n"
                 "# columns: kmer_size, start_5p, end_5p, start_3p, end_3p"]
+        if escalation_note:
+            rows.append(f"# NOTE: default params gave 0 pairs; escalated to "
+                        f"{escalation_note}")
         for (s1, e1, s2, e2), k in zip(all_mapped, all_mapped_k):
             rows.append(f"{k}\t{s1}\t{e1}\t{s2}\t{e2}")
         _debug_write(debug_dir, "01_kmer_pairs.tsv", "\n".join(rows))
 
     if not all_mapped:
-        if debug_dir is not None:
-            _debug_log(debug_dir,
-                       "[FULL] No kmer pairs satisfy the cross-half + --dist constraint; returning None.")
-        return None
+        # Genuinely no cross-half kmer signal even after escalation
+        # (degenerate input). Emit a conservative cut so the element still
+        # appears in the output -- never return None for a real LTR-RT.
+        return _fallback_boundary(seq, seq_len, extension, debug_dir,
+                                  reason="no_kmer_pairs_after_escalation")
 
     # Snapshot the full pair set for the debug dot plot before the diagonal
     # filter overwrites all_mapped with only its survivors.
     all_pairs_snapshot = list(all_mapped) if debug_dir is not None else None
 
     # --- LTR-RT diagonal filter (run BEFORE LIS) ---
-    # True 5'LTR<->3'LTR matches lie on a single dot-plot diagonal with
-    # offset s2 - s1 ~ seq_len - LTR_len. Internally repetitive LTR-RTs can
-    # produce stronger but spurious diagonals (internal-internal repeat phase,
-    # LTR-internal coincidence) at SMALLER offsets. Restrict to the diagonal
-    # with the largest offset that reaches both termini; LIS then picks the
-    # collinear subset within that diagonal.
-    diag = _pick_ltr_diagonal(all_mapped, seq_len)
-    if diag is None:
-        if debug_dir is not None:
-            _debug_log(debug_dir,
-                       f"[FULL] No kmer-pair diagonal reaches both termini "
-                       f"(within min({int(_DIAG_TERMINUS_GAP_FRAC*100)}%, "
-                       f"{_DIAG_TERMINUS_GAP_MAX_BP} bp) of each end) "
-                       f"with >= {_DIAG_MIN_PAIRS_PER_BIN} pairs; returning None.")
-            _plot_dotplot(debug_dir, seq_len, all_pairs_snapshot, None, None,
-                          status_note="REJECTED: no diagonal qualified")
-        return None
-    keep_idx, chosen_offset = diag
+    # True 5'LTR<->3'LTR matches lie on a dot-plot diagonal with offset
+    # s2 - s1 ~ seq_len - LTR_len, smeared across an offset band by indel
+    # drift. Internally repetitive LTR-RTs can produce spurious diagonals
+    # (internal-repeat phase, LTR-internal coincidence) at SMALLER offsets;
+    # the density-weighted score x non-overlap constraint in
+    # _pick_ltr_diagonal favors the true (large-offset, dense) diagonal,
+    # then LIS picks the collinear subset within the drift-merged band.
+    # _pick_ltr_diagonal returns None only for an empty pair set (already
+    # handled above); for any non-empty set it returns the best physically
+    # valid drift-merged offset band -- never an outright rejection.
+    keep_idx, chosen_offset = _pick_ltr_diagonal(all_mapped, seq_len)
     all_mapped = [all_mapped[i] for i in keep_idx]
     if debug_dir is not None:
         all_mapped_k = [all_mapped_k[i] for i in keep_idx]
         rows = [
             f"# kmer pairs surviving the LTR-RT diagonal filter\n"
-            f"# chosen offset bin: {chosen_offset} (+/- {_DIAG_BIN_WIDTH}); "
-            f"seq_len={seq_len}; implied LTR_len ~ seq_len - offset = "
-            f"{seq_len - chosen_offset}\n"
+            f"# chosen offset {chosen_offset} merged over +/-{_DIAG_DRIFT_BP} "
+            f"bp drift; seq_len={seq_len}; implied LTR_len ~ seq_len - offset "
+            f"= {seq_len - chosen_offset}\n"
             "# columns: kmer_size, start_5p, end_5p, start_3p, end_3p"
         ]
         for (s1, e1, s2, e2), k in zip(all_mapped, all_mapped_k):
             rows.append(f"{k}\t{s1}\t{e1}\t{s2}\t{e2}")
         _debug_write(debug_dir, "01b_diagonal_pairs.tsv", "\n".join(rows))
+
+    # Restrict to a TIGHT offset band around the chosen offset before LIS.
+    # _pick_ltr_diagonal used a wide drift band only to *select* the offset
+    # without rejecting indel-fragmented diagonals; feeding that wide band to
+    # the percentile boundary lets a parallel internal-repeat sub-diagonal
+    # pull the 98th/2nd percentiles into a gross over-extract. The wide set
+    # was already written to 01b above for debugging.
+    tight = [(p, k) for p, k in
+             zip(all_mapped, all_mapped_k if debug_dir is not None
+                 else [None] * len(all_mapped))
+             if abs((p[2] - p[0]) - chosen_offset) <= _DIAG_TIGHT_BP]
+    if tight:
+        all_mapped = [pk[0] for pk in tight]
+        if debug_dir is not None:
+            all_mapped_k = [pk[1] for pk in tight]
 
     # --- Longest Increasing Subsequence on s2 (replaces greedy filter) ---
     # Sort by s1, break ties by s2 so overlapping kmer sizes don't collide.
@@ -1146,66 +1245,72 @@ def _discover_and_extract_ltrs(seq, kmin, kmax, dist, std_factor, extension, deb
             rows.append(f"{all_mapped_k[i]}\t{s1}\t{e1}\t{s2}\t{e2}")
         _debug_write(debug_dir, "02_lis_pairs.tsv", "\n".join(rows))
 
-    if len(monotonic) < _MIN_LIS_PAIRS:
-        if debug_dir is not None:
-            _debug_log(debug_dir,
-                       f"[FULL] LIS produced {len(monotonic)} pairs (< {_MIN_LIS_PAIRS} required); returning None.")
-            _plot_dotplot(debug_dir, seq_len, all_pairs_snapshot, all_mapped, monotonic,
-                          chosen_offset=chosen_offset,
-                          status_note=f"REJECTED: LIS n={len(monotonic)} < {_MIN_LIS_PAIRS}")
-        return None
-
-    # --- Percentile-based LTR boundary extraction ---
-    end1_vals = sorted(e1 for _, e1, _, _ in monotonic)
-    start2_vals = sorted(s2 for _, _, s2, _ in monotonic)
     n = len(monotonic)
-
-    # 98th percentile for the outer boundary of the 5' LTR
-    idx_98 = min(int(n * 0.98), n - 1)
-    max_end1 = end1_vals[idx_98]
-
-    # 2nd percentile for the inner boundary of the 3' LTR
-    idx_02 = max(int(n * 0.02), 0)
-    min_start2 = start2_vals[idx_02]
-
-    len5p = max_end1
-    len3p = seq_len - (min_start2 - 1)
-    new_end1 = max_end1
-    new_start2 = min_start2
-
-    raw_end1, raw_start2 = max_end1, min_start2  # snapshot for debug
-
-    # Symmetrize to MAX(len5p, len3p) by growing the shorter side to match.
-    # The diagonal filter above has already restricted pairs to the true
-    # LTR<->LTR diagonal, so growing the shorter side doesn't risk dragging
-    # in unrelated sequence -- it just adds a small amount of LTR/flank
-    # symmetric to the longer raw length. The extra ~30-60 bp of flank
-    # (plus the +extension below) is what MAFFT needs to anchor the
-    # LTR-vs-LTR alignment via a shifted global alignment; too-tight
-    # extracts force MAFFT to align internal-vs-LTR end-to-end and the
-    # divergence estimate inflates.
-    if len5p < len3p:
-        new_end1 += len3p - len5p
-        if new_end1 > seq_len:
-            new_end1 = seq_len
-    elif len3p < len5p:
-        new_start2 -= len5p - len3p
-        if new_start2 < 1:
-            new_start2 = 1
-
-    sym_end1, sym_start2 = new_end1, new_start2  # snapshot post-symmetrize
-
-    new_end1 += extension
-    if new_end1 > seq_len:
-        new_end1 = seq_len
-    new_start2 -= extension
-    if new_start2 < 1:
-        new_start2 = 1
-
-    prop_5p = new_end1
-    prop_3p = seq_len - new_start2 + 1
     max_no_overlap = seq_len // 2
-    final_len = min(max_no_overlap, prop_5p, prop_3p)
+
+    if n >= _MIN_LIS_PAIRS:
+        # ---- Tier 1: strong collinear support -> percentile boundary ----
+        # Unchanged math: proven to match the --domains fast path to ~5e-4
+        # pooled raw_d on the 2878 elements both paths already handled.
+        boundary_tier = f"percentile (LIS n={n} >= {_MIN_LIS_PAIRS})"
+        end1_vals = sorted(e1 for _, e1, _, _ in monotonic)
+        start2_vals = sorted(s2 for _, _, s2, _ in monotonic)
+
+        # 98th pct -> outer boundary of 5' LTR; 2nd pct -> inner start of 3'.
+        idx_98 = min(int(n * 0.98), n - 1)
+        max_end1 = end1_vals[idx_98]
+        idx_02 = max(int(n * 0.02), 0)
+        min_start2 = start2_vals[idx_02]
+
+        len5p = max_end1
+        len3p = seq_len - (min_start2 - 1)
+        new_end1 = max_end1
+        new_start2 = min_start2
+        raw_end1, raw_start2 = max_end1, min_start2  # debug snapshot
+
+        # Symmetrize to MAX(len5p, len3p) by growing the shorter side. The
+        # diagonal filter already restricted pairs to the true LTR<->LTR
+        # diagonal, so growth adds only a little LTR/flank symmetric to the
+        # longer raw length -- the small flank (+ --extension) is what MAFFT
+        # needs to anchor a shifted global LTR-vs-LTR alignment.
+        if len5p < len3p:
+            new_end1 = min(new_end1 + (len3p - len5p), seq_len)
+        elif len3p < len5p:
+            new_start2 = max(new_start2 - (len5p - len3p), 1)
+        sym_end1, sym_start2 = new_end1, new_start2  # debug snapshot
+
+        new_end1 = min(new_end1 + extension, seq_len)
+        new_start2 = max(new_start2 - extension, 1)
+        # Offset-anchored guard. The diagonal OFFSET is a robust geometric
+        # measurement of the inter-LTR spacing, so the implied LTR length is
+        # a hard prior the percentile must not blow past. On clean diagonals
+        # the percentile sits well inside this bound (no effect on elements
+        # that already worked); on a noisy recovered diagonal it stops the
+        # 98th/2nd percentile + symmetrize from running away (true ~100 bp
+        # LTR was extracting as ~1.4 kb -> inflated divergence, some pushed
+        # past the raw_d<=0.35 filter and lost entirely).
+        implied_ltr = max(1, seq_len - chosen_offset)
+        lim = implied_ltr + extension + max(implied_ltr // 2, 100)
+        final_len = min(max_no_overlap, new_end1,
+                        seq_len - new_start2 + 1, lim)
+    else:
+        # ---- Tier 2: sparse support -> offset-implied LTR length ----
+        # Too few collinear pairs for trustworthy per-position percentiles,
+        # but the diagonal's offset still pins the inter-LTR spacing. Use the
+        # median offset of the chained pairs (robust to a few drift outliers)
+        # and apply the SAME symmetric cut the --domains fast path uses:
+        #   LTR_len ~ seq_len - offset ; cut first/last (LTR_len + extension).
+        # Principled (offset == inter-LTR spacing) and by construction close
+        # to the fast path whenever the offset is recovered correctly -- so
+        # the element is RETAINED (line-count parity) instead of rejected.
+        src = monotonic if monotonic else all_mapped
+        offs = sorted((s2 - s1) for s1, _, s2, _ in src)
+        med_off = offs[len(offs) // 2]
+        implied_ltr = max(1, seq_len - med_off)
+        final_len = min(max_no_overlap, implied_ltr + extension)
+        boundary_tier = (f"offset-implied (LIS n={n} < {_MIN_LIS_PAIRS}; "
+                         f"med_offset={med_off}, implied_LTR={implied_ltr})")
+        raw_end1 = raw_start2 = sym_end1 = sym_start2 = None
 
     new_end1 = final_len
     new_start2 = seq_len - final_len + 1
@@ -1216,18 +1321,13 @@ def _discover_and_extract_ltrs(seq, kmin, kmax, dist, std_factor, extension, deb
             f"sequence_length\t{seq_len}\n"
             f"half_length\t{half_len}\n"
             f"n_lis_pairs\t{n}\n"
-            f"# 98th-percentile end of 5' (max_end1) and 2nd-percentile start of 3' (min_start2):\n"
+            f"chosen_offset\t{chosen_offset}\n"
+            f"boundary_tier\t{boundary_tier}\n"
             f"raw_end1_5p\t{raw_end1}\n"
             f"raw_start2_3p\t{raw_start2}\n"
-            f"raw_len5p\t{len5p}\n"
-            f"raw_len3p\t{len3p}\n"
-            f"# After symmetrization to MAX(len5p, len3p) (force equal\n"
-            f"# lengths by growing the shorter side; safe because the\n"
-            f"# diagonal filter already restricted pairs to the true LTR\n"
-            f"# diagonal, so growth doesn't drag in unrelated sequence):\n"
             f"sym_end1_5p\t{sym_end1}\n"
             f"sym_start2_3p\t{sym_start2}\n"
-            f"# After --extension {extension} bp tacked on each side, and capping to seq_len//2:\n"
+            f"# After --extension {extension} bp and capping to seq_len//2:\n"
             f"final_end1_5p\t{new_end1}\n"
             f"final_start2_3p\t{new_start2}\n"
             f"final_5p_length\t{new_end1}\n"
@@ -1648,8 +1748,26 @@ def process_dir(dir_path):
                        f"<= {args.min_retained_fraction:.3f} * raw_bp({raw_bp:.0f}).")
             return (None, None)
 
-        # Adjust proposed LTR len by extension
-        if proposed_len is None:
+        # Reported LTR length = column count of the trimal-trimmed pairwise
+        # alignment. MAFFT aligned (5'LTR+flank) vs (3'LTR+flank); the
+        # homologous LTR aligns while the non-homologous flanks do not, and
+        # trimal -automated1 strips exactly those flank columns -- so the
+        # surviving columns ARE the LTR span. This tracks homology through
+        # divergence far better than the raw kmer anchor
+        # (proposed_len - extension), which retreats inward from diverged
+        # termini: on synthetic ground truth the kmer anchor under-calls the
+        # boundary by ~8-33 bp (worsening with divergence) while the trimal
+        # column count is exact across the whole usable divergence range.
+        # Isolated to this reported field: divergence (from WFA), the pooled
+        # summary (uses aln_len), and line counts are unaffected. Falls back
+        # to the old kmer estimate only if the trimmed alignment can't be read.
+        aln_cols = 0
+        for _h, _s in _parse_fasta_records(clean_data):
+            aln_cols = len(_s)
+            break
+        if aln_cols > 0:
+            proposed_adj = aln_cols
+        elif proposed_len is None:
             proposed_adj = 0
             if ARGS.verbose:
                 print(f"[WARN] Could not parse proposed LTR length for {dir_path.name}; inserting 0.")
