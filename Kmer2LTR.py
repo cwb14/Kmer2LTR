@@ -1909,15 +1909,26 @@ def _consensus_path_for_outfile(outfile: str) -> str:
     return f"{outfile}.consensus.fa"
 
 
+# Hardcoded --min-seq-id sweep. mmseqs easy-cluster is run once per value and
+# every resulting *_cluster.tsv is retained. --min-seq-id sets the depth of
+# clustering: low values lump at the superfamily/lineage level, high values
+# split toward family/clade/recent-burst level. Different downstream analyses
+# want different depths, so we keep them all rather than pick one. 1.0 is
+# omitted (degenerate / per-sequence); 0.98 is the practical near-identical tier.
+_MIN_SEQ_ID_SWEEP = (0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95, 0.98)
+
+
 def _run_mmseqs_cluster(consensus_fasta, threads: int, verbose: bool):
     """
-    Cluster the IUPAC consensus LTR FASTA with mmseqs easy-cluster, retaining
-    only the *_cluster.tsv. Auxiliary outputs (*_all_seqs.fasta,
-    *_rep_seq.fasta, and the mmseqs tmp dir) are deleted.
+    Cluster the IUPAC consensus LTR FASTA with mmseqs easy-cluster, sweeping
+    --min-seq-id over _MIN_SEQ_ID_SWEEP and retaining one *_cluster.tsv per
+    value. Outputs are named <prefix>_id<min-seq-id>_cluster.tsv (e.g.
+    ..._id0.60_cluster.tsv ... ..._id0.98_cluster.tsv). Auxiliary outputs
+    (*_all_seqs.fasta, *_rep_seq.fasta, and the per-run mmseqs tmp dir) are
+    deleted after each run.
 
-    Current parameters cluster to lineage level (ie, lots of lumping). For clades and subclade level, just adjust --min-seq-id up (0.75 for sub-clade; 0.85 for recent bursts).
-
-    Parameters were chosen via a large grid search benchmarked on Arabidopsis
+    Fixed parameters (-c 0.5, --cov-mode 0, --cluster-mode 1, --mask 0,
+    -s 7.5) were chosen via a large grid search benchmarked on Arabidopsis
     LTR annotations, with the goal of jointly minimizing:
       - singletons (single-copy clusters), and
       - family mixing (e.g., a Tork co-clustering with an Ogre is a bad sign;
@@ -1930,69 +1941,80 @@ def _run_mmseqs_cluster(consensus_fasta, threads: int, verbose: bool):
       (2) The IUPAC consensus LTR FASTA (this pipeline's output) outperformed
           both the full-length LTR-RT FASTA and a 5'-LTR-only FASTA as input
           to mmseqs.
-    mmseqs is fast, so this step adds little to total runtime.
+    mmseqs is fast, so even the full sweep adds little to total runtime.
 
-    Returns the Path to <prefix>_cluster.tsv on success, or None if the
-    consensus FASTA is missing/empty, mmseqs is unavailable, or mmseqs fails.
+    Returns a list of Paths to the created *_cluster.tsv files (one per
+    --min-seq-id that succeeded; possibly fewer than the sweep length if some
+    runs failed). Returns an empty list if the consensus FASTA is
+    missing/empty or mmseqs is unavailable.
     """
     consensus_fasta = Path(consensus_fasta)
     if not consensus_fasta.exists() or consensus_fasta.stat().st_size == 0:
         print(f"[CLUSTER] Consensus FASTA {consensus_fasta} is missing or empty; "
               f"skipping mmseqs.")
-        return None
+        return []
 
-    cluster_prefix = consensus_fasta.with_suffix("")  # strips final '.fa'
-    tmp_dir = Path(tempfile.mkdtemp(
-        prefix=f"{consensus_fasta.stem}_mmseqs_",
-        dir=str(consensus_fasta.parent),
-    ))
+    base_prefix = consensus_fasta.with_suffix("")  # strips final '.fa'
+    cluster_tsvs = []
 
-    cmd = [
-        "mmseqs", "easy-cluster",
-        str(consensus_fasta), str(cluster_prefix), str(tmp_dir),
-        "--min-seq-id", "0.6",
-        "-c", "0.6",
-        "--cov-mode", "1",
-        "--cluster-mode", "1",
-        "--mask", "0",
-        "-s", "7.5",
-        "--threads", str(threads),
-    ]
-    if verbose:
-        print("Running:", " ".join(cmd))
+    for min_seq_id in _MIN_SEQ_ID_SWEEP:
+        id_tag = f"{min_seq_id:.2f}"
+        run_prefix = Path(f"{base_prefix}_id{id_tag}")
+        tmp_dir = Path(tempfile.mkdtemp(
+            prefix=f"{consensus_fasta.stem}_mmseqs_id{id_tag}_",
+            dir=str(consensus_fasta.parent),
+        ))
 
-    try:
-        subprocess.run(
-            cmd,
-            stdout=(None if verbose else subprocess.DEVNULL),
-            stderr=(None if verbose else subprocess.DEVNULL),
-            check=True,
-        )
-    except FileNotFoundError:
-        print("[CLUSTER] mmseqs not found in PATH; cannot cluster consensus LTRs.",
-              file=sys.stderr)
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-        return None
-    except subprocess.CalledProcessError as exc:
-        print(f"[CLUSTER] mmseqs easy-cluster failed (exit {exc.returncode}).",
-              file=sys.stderr)
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-        return None
+        cmd = [
+            "mmseqs", "easy-cluster",
+            str(consensus_fasta), str(run_prefix), str(tmp_dir),
+            "--min-seq-id", id_tag,
+            "-c", "0.5",
+            "--cov-mode", "0",
+            "--cluster-mode", "1",
+            "--mask", "0",
+            "-s", "7.5",
+            "--threads", str(threads),
+        ]
+        if verbose:
+            print("Running:", " ".join(cmd))
 
-    shutil.rmtree(tmp_dir, ignore_errors=True)
-    for ext in ("_all_seqs.fasta", "_rep_seq.fasta"):
-        aux = Path(f"{cluster_prefix}{ext}")
         try:
-            aux.unlink()
+            subprocess.run(
+                cmd,
+                stdout=(None if verbose else subprocess.DEVNULL),
+                stderr=(None if verbose else subprocess.DEVNULL),
+                check=True,
+            )
         except FileNotFoundError:
-            pass
+            print("[CLUSTER] mmseqs not found in PATH; cannot cluster consensus LTRs.",
+                  file=sys.stderr)
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            return cluster_tsvs
+        except subprocess.CalledProcessError as exc:
+            print(f"[CLUSTER] mmseqs easy-cluster failed at --min-seq-id {id_tag} "
+                  f"(exit {exc.returncode}); continuing with remaining values.",
+                  file=sys.stderr)
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            continue
 
-    cluster_tsv = Path(f"{cluster_prefix}_cluster.tsv")
-    if not cluster_tsv.exists():
-        print(f"[CLUSTER] Expected cluster TSV not found: {cluster_tsv}",
-              file=sys.stderr)
-        return None
-    return cluster_tsv
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        for ext in ("_all_seqs.fasta", "_rep_seq.fasta"):
+            aux = Path(f"{run_prefix}{ext}")
+            try:
+                aux.unlink()
+            except FileNotFoundError:
+                pass
+
+        cluster_tsv = Path(f"{run_prefix}_cluster.tsv")
+        if not cluster_tsv.exists():
+            print(f"[CLUSTER] Expected cluster TSV not found: {cluster_tsv}",
+                  file=sys.stderr)
+            continue
+        cluster_tsvs.append(cluster_tsv)
+        print(f"[CLUSTER] --min-seq-id {id_tag} -> {cluster_tsv}")
+
+    return cluster_tsvs
 
 
 def process_one_input(args_base: argparse.Namespace, in_fasta: str, per_prefix_domains: dict, multi_mode: bool):
@@ -2061,10 +2083,10 @@ def process_one_input(args_base: argparse.Namespace, in_fasta: str, per_prefix_d
     print(f"All sequences processed for {pref}. Output in {ARGS.outfile}")
     if consensus_outfile:
         print(f"LTR consensus FASTA in {consensus_outfile}")
-        cluster_tsv = _run_mmseqs_cluster(
+        cluster_tsvs = _run_mmseqs_cluster(
             consensus_outfile, args_base.threads, args_base.verbose
         )
-        if cluster_tsv:
+        for cluster_tsv in cluster_tsvs:
             print(f"LTR cluster TSV in {cluster_tsv}")
 
 
@@ -2353,18 +2375,33 @@ if __name__ == "__main__":
             "IUPAC consensus; headers match the input LTR-RT FASTA exactly. "
             "Clustering parameters were chosen via a large grid search benchmarked on "
             "Arabidopsis LTR annotations to jointly minimize singletons and "
-            "cross-family clusters. "
+            "cross-family clusters. mmseqs is run once per --min-seq-id in a "
+            "hardcoded sweep (0.60..0.98) and every cluster TSV is kept, since "
+            "different --min-seq-id values cluster at different depths "
+            "(superfamily/lineage -> family -> clade -> recent burst). "
             "Single-input outputs: <outfile>.consensus.fa and "
-            "<outfile>.consensus_cluster.tsv (with .results replaced). "
+            "<outfile>.consensus_id<min-seq-id>_cluster.tsv (with .results replaced). "
             "Multi-input outputs: <prefix>.LTRs.alns.consensus.fa and "
-            "<prefix>.LTRs.alns.consensus_cluster.tsv per input. "
+            "<prefix>.LTRs.alns.consensus_id<min-seq-id>_cluster.tsv per input. "
             "Requires mmseqs in PATH. Not compatible with --wfa-align."
         )
     )
     parser.add_argument(
+        "--cluster-only", dest="cluster_only", metavar="CONSENSUS_FASTA",
+        help=(
+            "Skip the entire LTR extraction/consensus pipeline and run only the "
+            "mmseqs --min-seq-id sweep (see --ltr-cluster) on this pre-existing "
+            "IUPAC consensus FASTA. Writes <CONSENSUS_FASTA stem>_id<min-seq-id>"
+            "_cluster.tsv next to the input. With this set, -i/--input-fastas is "
+            "not required and all other pipeline options are ignored. "
+            "Requires mmseqs in PATH."
+        )
+    )
+    parser.add_argument(
         "-i", "--input-fastas",
-        nargs="+", required=True,
-        help="Path(s) to multi-sequence LTR-RT FASTA file(s)."
+        nargs="+", required=False, default=None,
+        help=("Path(s) to multi-sequence LTR-RT FASTA file(s). "
+              "Required unless --cluster-only is given.")
     )
 #    parser.add_argument(
 #        "input_fastas", nargs="+",
@@ -2393,10 +2430,27 @@ if __name__ == "__main__":
         parser.error("--ltr-cluster and --wfa-align are mutually exclusive: "
                      "the consensus + clustering pipeline requires the initial alignment to be MAFFT.")
 
-    # --ltr-cluster shells out to mmseqs; fail fast if it isn't installed.
-    if args.ltr_cluster and shutil.which("mmseqs") is None:
-        parser.error("--ltr-cluster requires mmseqs in PATH; "
+    # --ltr-cluster and --cluster-only both shell out to mmseqs; fail fast if
+    # it isn't installed.
+    if (args.ltr_cluster or args.cluster_only) and shutil.which("mmseqs") is None:
+        parser.error("clustering requires mmseqs in PATH; "
                      "install (e.g. 'mamba install -c bioconda mmseqs2') and retry.")
+
+    # --cluster-only: skip the whole LTR pipeline and just run the mmseqs
+    # --min-seq-id sweep on a pre-existing consensus FASTA, then exit.
+    if args.cluster_only:
+        if not os.path.exists(args.cluster_only):
+            parser.error(f"--cluster-only: consensus FASTA not found: {args.cluster_only}")
+        cluster_tsvs = _run_mmseqs_cluster(
+            args.cluster_only, args.threads, args.verbose
+        )
+        for cluster_tsv in cluster_tsvs:
+            print(f"LTR cluster TSV in {cluster_tsv}")
+        sys.exit(0 if cluster_tsvs else 1)
+
+    # Normal mode requires input FASTAs (relaxed in argparse for --cluster-only).
+    if not args.input_fastas:
+        parser.error("-i/--input-fastas is required unless --cluster-only is given.")
 
     # Multi-input mode check and warnings for -t/-o
     multi_mode = len(args.input_fastas) > 1
