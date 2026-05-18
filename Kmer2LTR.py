@@ -1915,7 +1915,7 @@ def _consensus_path_for_outfile(outfile: str) -> str:
 # split toward family/clade/recent-burst level. Different downstream analyses
 # want different depths, so we keep them all rather than pick one. 1.0 is
 # omitted (degenerate / per-sequence); 0.98 is the practical near-identical tier.
-_MIN_SEQ_ID_SWEEP = (0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95, 0.98)
+_MIN_SEQ_ID_SWEEP = (0.70, 0.75, 0.80, 0.85, 0.90, 0.95, 0.98)
 
 
 def _run_mmseqs_cluster(consensus_fasta, threads: int, verbose: bool):
@@ -1923,7 +1923,7 @@ def _run_mmseqs_cluster(consensus_fasta, threads: int, verbose: bool):
     Cluster the IUPAC consensus LTR FASTA with mmseqs easy-cluster, sweeping
     --min-seq-id over _MIN_SEQ_ID_SWEEP and retaining one *_cluster.tsv per
     value. Outputs are named <prefix>_id<min-seq-id>_cluster.tsv (e.g.
-    ..._id0.60_cluster.tsv ... ..._id0.98_cluster.tsv). Auxiliary outputs
+    ..._id0.70_cluster.tsv ... ..._id0.98_cluster.tsv). Auxiliary outputs
     (*_all_seqs.fasta, *_rep_seq.fasta, and the per-run mmseqs tmp dir) are
     deleted after each run.
 
@@ -2376,7 +2376,7 @@ if __name__ == "__main__":
             "Clustering parameters were chosen via a large grid search benchmarked on "
             "Arabidopsis LTR annotations to jointly minimize singletons and "
             "cross-family clusters. mmseqs is run once per --min-seq-id in a "
-            "hardcoded sweep (0.60..0.98) and every cluster TSV is kept, since "
+            "hardcoded sweep (0.70..0.98) and every cluster TSV is kept, since "
             "different --min-seq-id values cluster at different depths "
             "(superfamily/lineage -> family -> clade -> recent burst). "
             "Single-input outputs: <outfile>.consensus.fa and "
