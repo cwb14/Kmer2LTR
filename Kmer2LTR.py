@@ -2295,8 +2295,8 @@ if __name__ == "__main__":
         help="Standard deviation factor for kmer filtering."
     )
     parser.add_argument(
-        "-e", type=int, default=65, dest="extension",
-        help="Extension length for LTR extraction (default: 65)."
+        "-e", type=int, default=120, dest="extension",
+        help="Extension length for LTR extraction (default: 120)."
     )
     parser.add_argument(
         "-t", default="./temp", dest="temp_dir",
