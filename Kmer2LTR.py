@@ -1493,6 +1493,35 @@ def parse_proposed_ltr_len_from_aln(aln_fa: Path) -> int | None:
     return None
 
 
+def _internal_genomic_locus(header_token: str, end5p: int, start3p: int, seq_len: int):
+    """Genomic interval of the between-LTR (internal) region for one element.
+
+    Sequence space is 1-based: the 5' LTR occupies bp 1..end5p and the 3' LTR
+    occupies bp start3p..seq_len, so the 5' LTR is `end5p` bp and the 3' LTR is
+    `seq_len - start3p + 1` bp. If the header token carries the element's locus
+    as 'chrom:start-end' (anything from the first '#' on is ignored, and '..' is
+    accepted in place of '-'), the internal region's locus is the element locus
+    shrunk by each LTR length:
+        istart = start + 5'LTR_len
+        iend   = end   - 3'LTR_len
+
+    For an element with a nested insertion the header span is larger than the
+    stored sequence; istart..iend then bound the full genomic region between the
+    LTRs (which in the genome still contains the excised insertion), so the
+    interval can be longer than the sequence written to the internal FASTA.
+
+    Returns 'chrom:istart-iend', or None when the token has no parseable locus.
+    """
+    locus = header_token.split("#", 1)[0]
+    m = re.match(r"^(.+):(\d+)(?:-|\.\.)(\d+)$", locus)
+    if not m:
+        return None
+    chrom, start, end = m.group(1), int(m.group(2)), int(m.group(3))
+    istart = start + end5p
+    iend = end - (seq_len - start3p + 1)
+    return f"{chrom}:{istart}-{iend}"
+
+
 def try_fast_path(dir_path: Path, header_token: str, full_header: str, seq_len: int, seq: str):
     """
     Fast-path when domains TSV provides LTR length:
@@ -1634,7 +1663,9 @@ def try_fast_path(dir_path: Path, header_token: str, full_header: str, seq_len: 
         if getattr(ARGS, "internal_outfile", None):
             internal_seq = seq[end5p:start3p - 1]
             if internal_seq:
-                internal_record = f">{header_token}\n{internal_seq}\n"
+                locus = _internal_genomic_locus(header_token, end5p, start3p, seq_len)
+                hdr = f"{header_token}\t{locus}" if locus else header_token
+                internal_record = f">{hdr}\n{internal_seq}\n"
         if (getattr(ARGS, 'ltr_cluster', False) or getattr(ARGS, 'ltr_consensus', False)) and not getattr(ARGS, 'wfa_align', False):
             consensus_record = _build_consensus_from_trimmed(clean_data, full_header, ARGS.verbose, debug_dir=debug_dir)
             if debug_dir is not None and consensus_record:
@@ -1815,7 +1846,9 @@ def process_dir(dir_path):
             if getattr(ARGS, "internal_outfile", None):
                 internal_seq = seq[end5p:start3p - 1] if start3p - 1 > end5p else ""
                 if internal_seq:
-                    internal_record = f">{header_token}\n{internal_seq}\n"
+                    locus = _internal_genomic_locus(header_token, end5p, start3p, seq_len)
+                    hdr = f"{header_token}\t{locus}" if locus else header_token
+                    internal_record = f">{hdr}\n{internal_seq}\n"
             if (getattr(ARGS, 'ltr_cluster', False) or getattr(ARGS, 'ltr_consensus', False)) and not getattr(ARGS, 'wfa_align', False):
                 consensus_record = _build_consensus_from_trimmed(clean_data, full_header, verbose, debug_dir=debug_dir)
                 if debug_dir is not None and consensus_record:
@@ -2456,7 +2489,12 @@ if __name__ == "__main__":
         "--internal-fasta", action="store_true", dest="internal_fasta",
         help="Also write each element's internal (between-LTR) sequence to "
              "<outfile>.internal.fa, and append the 5'/3' LTR boundary positions "
-             "as two extra columns of the results table."
+             "as two extra columns of the results table. When an element's header "
+             "carries a 'chrom:start-end' locus, the internal FASTA header gains a "
+             "tab-separated second field with the internal region's genomic interval "
+             "(the locus shrunk by the 5'/3' LTR lengths); for elements with a nested "
+             "insertion this interval spans the excised insertion and so can be longer "
+             "than the internal sequence itself."
     )
 
     # --- kmer boundary tuning (advanced) --------------------------------- #
