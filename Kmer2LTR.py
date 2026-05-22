@@ -140,7 +140,7 @@ Pipeline at a glance (per LTR-RT in the input FASTA):
        Fast path  (only if --domains TSV provides this header's LTR_len):
          extract first/last (LTR_len + --extension) bp directly.
        Otherwise  (kmer pipeline):
-         a) Enumerate kmers length --kmin..--kmax that appear in BOTH
+         a) Enumerate kmers length --kmer-range MIN..MAX that appear in BOTH
             halves of the sequence, --dist or more bp apart.
          b) Sort by 5' position; keep the longest-increasing-subsequence
             of the 3' positions => collinear pair set.
@@ -154,7 +154,7 @@ Pipeline at a glance (per LTR-RT in the input FASTA):
        to enter/exit the reliable region, and EXCLUDES those k columns
        from the metrics. This is how unreliable LTR-RT termini are
        chopped before counting substitutions.
-  5. (Optional) Build IUPAC consensus per LTR-RT for --ltr-cluster.
+  5. (Optional) Build IUPAC consensus per LTR-RT for --ltr-consensus/--ltr-cluster.
 
 Per-sequence debug files (under <temp_dir>/<sanitized_name>/debug/):
   Fast path:
@@ -178,8 +178,8 @@ Per-sequence debug files (under <temp_dir>/<sanitized_name>/debug/):
     07_wfa_cmd.txt               Exact WFA divergence command (with -d).
     08_wfa_stdout.txt            WFA divergence raw stats line.
     09_wfa_stderr.txt            WFA -d alignment view + boundary kmers.
-    10_consensus_realign.fa      Realigned ungapped LTRs (only --ltr-cluster).
-    11_consensus.fa              IUPAC consensus (only --ltr-cluster).
+    10_consensus_realign.fa      Realigned ungapped LTRs (--ltr-consensus/--ltr-cluster).
+    11_consensus.fa              IUPAC consensus (--ltr-consensus/--ltr-cluster).
     README.txt                   Step-by-step narrative for this LTR-RT.
 
 Things --debug is designed to help you diagnose:
@@ -442,7 +442,7 @@ def _run_trimal_mem(aln_str: str, verbose: bool) -> str:
             pass
 
 
-# ---- IUPAC consensus helpers (for optional --ltr-cluster output) ---- #
+# ---- IUPAC consensus helpers (for --ltr-consensus/--ltr-cluster output) ---- #
 
 # Two-base IUPAC ambiguity codes.
 _IUPAC_PAIR = {
@@ -1501,27 +1501,27 @@ def try_fast_path(dir_path: Path, header_token: str, full_header: str, seq_len: 
       - Run MAFFT -> trimal -> WFA, return result line
       - Optionally also build an IUPAC consensus from the trimmed LTRs.
 
-    Returns (attempted, (result_line, consensus_record)):
-      (False, (None, None))           fast-path doesn't apply (caller falls back)
-      (True,  (None, None))           fast-path ran but result was filtered/skipped
-      (True,  (result, None))         result produced, consensus disabled or skipped
-      (True,  (result, consensus))    result and consensus FASTA record produced
+    Returns (attempted, (result_line, consensus_record, internal_record)):
+      (False, (None, None, None))           fast-path doesn't apply (caller falls back)
+      (True,  (None, None, None))           fast-path ran but result was filtered/skipped
+      (True,  (result, None, None))         result produced, optional outputs disabled or skipped
+      (True,  (result, consensus, internal))  result and optional records produced
     """
     global ARGS, DOMAINS
     if not DOMAINS:
-        return (False, (None, None))
+        return (False, (None, None, None))
 
     # Duplicate name? -> uncertain mapping -> full pipeline unless user overrides.
     if (dir_path / "DUPLICATE_NAME").exists() and not ARGS.assume_dup_same_ltr:
         if ARGS.verbose:
             print(f"[FAST-PATH SKIP] Duplicate header name detected for '{header_token}'. "
                   f"Use --assume-duplicate-same-ltr to override (risky).")
-        return (False, (None, None))
+        return (False, (None, None, None))
     # If ARGS.assume_dup_same_ltr is True, proceed assuming all duplicates with this
     # header token share the same LTR length from DOMAINS.
 
     if header_token not in DOMAINS:
-        return (False, (None, None))
+        return (False, (None, None, None))
 
     ltr_len = DOMAINS[header_token]
 
@@ -1530,7 +1530,7 @@ def try_fast_path(dir_path: Path, header_token: str, full_header: str, seq_len: 
         if ARGS.verbose:
             print(f"[FAST-PATH SKIP] Safety check failed for '{header_token}': "
                   f"seq_len={seq_len} <= 2*{ltr_len}+50")
-        return (False, (None, None))
+        return (False, (None, None, None))
 
     debug_dir = _ensure_debug_dir(dir_path)
     _debug_log(debug_dir,
@@ -1575,7 +1575,7 @@ def try_fast_path(dir_path: Path, header_token: str, full_header: str, seq_len: 
     except subprocess.CalledProcessError:
         print(f"[SKIP] mafft failed for {dir_path.name}")
         _debug_log(debug_dir, "[FAST] alignment step failed.")
-        return (True, (None, None))
+        return (True, (None, None, None))
 
     aligner_name = "WFA (--wfa-align)" if getattr(ARGS, "wfa_align", False) else "MAFFT --auto"
     _debug_write(debug_dir, "05_alignment.fa", aln_data)
@@ -1588,7 +1588,7 @@ def try_fast_path(dir_path: Path, header_token: str, full_header: str, seq_len: 
     except subprocess.CalledProcessError:
         print(f"[SKIP] trimal failed for {dir_path.name}")
         _debug_log(debug_dir, "[FAST] trimal step failed.")
-        return (True, (None, None))
+        return (True, (None, None, None))
 
     _debug_write(debug_dir, "06_trimal.fa", clean_data)
     _debug_log(debug_dir, "trimal -automated1 -keepheader written to 06_trimal.fa.")
@@ -1605,7 +1605,7 @@ def try_fast_path(dir_path: Path, header_token: str, full_header: str, seq_len: 
         _debug_log(debug_dir,
                    f"[FAST] SKIP: clean_bp({clean_bp}) + ext({ARGS.extension}) "
                    f"<= {ARGS.min_retained_fraction:.3f} * raw_bp({raw_bp:.0f}).")
-        return (True, (None, None))  # fast-path executed, but result skipped
+        return (True, (None, None, None))  # fast-path executed, but result skipped
 
     # Fast-path: use DOMAINS_TSV value directly, do NOT subtract extension
     reported_len = ltr_len
@@ -1622,12 +1622,25 @@ def try_fast_path(dir_path: Path, header_token: str, full_header: str, seq_len: 
                     else "[FAST] WFA divergence yielded nothing (filtered or error)."))
 
     consensus_record = None
-    if result is not None and getattr(ARGS, 'ltr_cluster', False) and not getattr(ARGS, 'wfa_align', False):
-        consensus_record = _build_consensus_from_trimmed(clean_data, full_header, ARGS.verbose, debug_dir=debug_dir)
-        if debug_dir is not None and consensus_record:
-            _debug_write(debug_dir, "11_consensus.fa", consensus_record)
+    internal_record = None
+    if result is not None:
+        # Fast-path LTR boundaries come directly from the domains TSV: the
+        # 5' LTR proper is bp 1..ltr_len, the 3' LTR proper is bp
+        # (seq_len - ltr_len + 1)..seq_len. The extension flank is only used
+        # to feed MAFFT, not to define the LTR.
+        end5p = ltr_len
+        start3p = seq_len - ltr_len + 1
+        result = result.rstrip("\n") + f"\t{end5p}\t{start3p}\n"
+        if getattr(ARGS, "internal_outfile", None):
+            internal_seq = seq[end5p:start3p - 1]
+            if internal_seq:
+                internal_record = f">{header_token}\n{internal_seq}\n"
+        if (getattr(ARGS, 'ltr_cluster', False) or getattr(ARGS, 'ltr_consensus', False)) and not getattr(ARGS, 'wfa_align', False):
+            consensus_record = _build_consensus_from_trimmed(clean_data, full_header, ARGS.verbose, debug_dir=debug_dir)
+            if debug_dir is not None and consensus_record:
+                _debug_write(debug_dir, "11_consensus.fa", consensus_record)
 
-    return (True, (result, consensus_record))
+    return (True, (result, consensus_record, internal_record))
 
 
 def process_dir(dir_path):
@@ -1637,10 +1650,11 @@ def process_dir(dir_path):
         then run MAFFT -> trimal -> WFA.
       - Otherwise run the original heavy pipeline (k-mers -> map -> filter -> extract LTRs -> MAFFT -> trimal -> WFA).
 
-    When ARGS.purge_subdirs is True, the per-sequence temp directory is removed
+    When ARGS.purge_subdirs is enabled, the per-sequence temp directory is removed
     at the end of processing (even if skipped or errors occur).
 
-    Always returns a tuple (divergence_line, consensus_record); either element may be None.
+    Always returns a tuple (divergence_line, consensus_record, internal_record);
+    any element may be None.
     """
     dir_path = Path(dir_path)
 
@@ -1670,7 +1684,7 @@ def process_dir(dir_path):
                 pass
             d = _ensure_debug_dir(dir_path)
             _debug_log(d, f"=== SKIPPED.too_short ===\nseq_len={seq_len} < MIN_SEQ_BP={MIN_SEQ_BP}.")
-            return (None, None)
+            return (None, None, None)
 
         # ===== FAST-PATH TRY =====
         try:
@@ -1697,16 +1711,16 @@ def process_dir(dir_path):
             except Exception:
                 pass
             _debug_log(debug_dir, "[FULL] No filtered kmer pairs; sequence skipped.")
-            return (None, None)
+            return (None, None, None)
 
-        ltr_5p, ltr_3p, end5p, start3p = ltr_result
-        fasta_str = (f">{full_header}\t5p:1-{end5p}\n{ltr_5p}\n"
-                     f">{full_header}\t3p:{start3p}-{seq_len}\n{ltr_3p}\n")
+        ltr_5p, ltr_3p, end5p_raw, start3p_raw = ltr_result
+        fasta_str = (f">{full_header}\t5p:1-{end5p_raw}\n{ltr_5p}\n"
+                     f">{full_header}\t3p:{start3p_raw}-{seq_len}\n{ltr_3p}\n")
 
         _debug_write(debug_dir, "04_extracted_ltrs.fa", fasta_str)
         _debug_log(debug_dir,
-                   f"Extracted 5' LTR (1-{end5p}, {end5p} bp) and 3' LTR "
-                   f"({start3p}-{seq_len}, {seq_len - start3p + 1} bp).")
+                   f"Extracted 5' LTR (1-{end5p_raw}, {end5p_raw} bp) and 3' LTR "
+                   f"({start3p_raw}-{seq_len}, {seq_len - start3p_raw + 1} bp).")
 
         # In-memory pipeline: MAFFT -> trimal -> quality check -> WFA
         try:
@@ -1714,7 +1728,7 @@ def process_dir(dir_path):
         except subprocess.CalledProcessError:
             print(f"[SKIP] mafft failed for {dir_path.name}")
             _debug_log(debug_dir, "[FULL] alignment step failed.")
-            return (None, None)
+            return (None, None, None)
 
         aligner_name = "WFA (--wfa-align)" if getattr(ARGS, "wfa_align", False) else "MAFFT --auto"
         _debug_write(debug_dir, "05_alignment.fa", aln_data)
@@ -1727,7 +1741,7 @@ def process_dir(dir_path):
         except subprocess.CalledProcessError:
             print(f"[SKIP] trimal failed for {dir_path.name}")
             _debug_log(debug_dir, "[FULL] trimal step failed.")
-            return (None, None)
+            return (None, None, None)
 
         _debug_write(debug_dir, "06_trimal.fa", clean_data)
         _debug_log(debug_dir, "trimal -automated1 -keepheader written to 06_trimal.fa.")
@@ -1746,7 +1760,7 @@ def process_dir(dir_path):
             _debug_log(debug_dir,
                        f"[FULL] SKIP: clean_bp({clean_bp}) + ext({extension}) "
                        f"<= {args.min_retained_fraction:.3f} * raw_bp({raw_bp:.0f}).")
-            return (None, None)
+            return (None, None, None)
 
         # Reported LTR length = column count of the trimal-trimmed pairwise
         # alignment. MAFFT aligned (5'LTR+flank) vs (3'LTR+flank); the
@@ -1787,12 +1801,27 @@ def process_dir(dir_path):
                         else "[FULL] WFA divergence yielded nothing (filtered or error)."))
 
         consensus_record = None
-        if result is not None and getattr(ARGS, 'ltr_cluster', False) and not getattr(ARGS, 'wfa_align', False):
-            consensus_record = _build_consensus_from_trimmed(clean_data, full_header, verbose, debug_dir=debug_dir)
-            if debug_dir is not None and consensus_record:
-                _debug_write(debug_dir, "11_consensus.fa", consensus_record)
+        internal_record = None
+        if result is not None:
+            # _discover_and_extract_ltrs returns boundaries that include the
+            # --extension flank on the inner side. Back the extension out to
+            # report the LTR proper: 5' LTR proper ends at end5p_raw - extension,
+            # 3' LTR proper starts at start3p_raw + extension. Clamp to keep
+            # them inside [1, seq_len] when the seq was so short the extension
+            # was capped during extraction.
+            end5p = max(1, end5p_raw - extension)
+            start3p = min(seq_len, start3p_raw + extension)
+            result = result.rstrip("\n") + f"\t{end5p}\t{start3p}\n"
+            if getattr(ARGS, "internal_outfile", None):
+                internal_seq = seq[end5p:start3p - 1] if start3p - 1 > end5p else ""
+                if internal_seq:
+                    internal_record = f">{header_token}\n{internal_seq}\n"
+            if (getattr(ARGS, 'ltr_cluster', False) or getattr(ARGS, 'ltr_consensus', False)) and not getattr(ARGS, 'wfa_align', False):
+                consensus_record = _build_consensus_from_trimmed(clean_data, full_header, verbose, debug_dir=debug_dir)
+                if debug_dir is not None and consensus_record:
+                    _debug_write(debug_dir, "11_consensus.fa", consensus_record)
 
-        return (result, consensus_record)
+        return (result, consensus_record, internal_record)
 
     finally:
         # Always try to remove the subdir if purge_subdirs is enabled
@@ -1810,10 +1839,15 @@ def write_summary(main_out_path: str):
     Read the main outfile (one row per element), sum length/transition/transversion,
     and write pooled distances to '<outfile>.summary'.
 
-    Columns (no header) AFTER the new insertion:
-    1 LTR-RT  2 proposed_len_minus_ext  3 LTR_LEN  4 substitutions
-    5 transitions  6 transversions  7 p-dist  8 p-time
-    9 JC69-dist  10 JC69-time  11 K2P-dist  12 K2P-time
+    Columns (no header), tab-separated:
+    1 LTR-RT     2 LTR_LEN     3 ALN_LEN      4 substitutions
+    5 transitions  6 transversions  7 p-dist     8 p-time
+    9 JC69-dist  10 JC69-time  11 K2P-dist   12 K2P-time
+    13 left_trim 14 right_trim 15 end5p      16 start3p
+
+    end5p / start3p are 1-based bp coordinates of the LAST bp of the 5' LTR
+    and the FIRST bp of the 3' LTR, respectively (extension flank excluded).
+    left_trim / right_trim are bp trimmed by WFA's -k 5 -K boundary detector.
     """
     total_len = 0
     total_ts = 0.0
@@ -1825,14 +1859,13 @@ def write_summary(main_out_path: str):
             if not line:
                 continue
             parts = line.split()
-            # need at least 12 columns now
+            # need at least 12 columns (end5p/start3p in 13-14 are optional for parsing)
             if len(parts) < 12:
                 continue
             try:
-                # NOTE: indexes shifted by +1 due to new column at position 2
-                L = int(parts[2])             # LTR_LEN now in column 3
-                ts = float(parts[4])          # transitions now in column 5
-                tv = float(parts[5])          # transversions now in column 6
+                L = int(parts[2])             # ALN_LEN (pairs from WFA)
+                ts = float(parts[4])          # transitions
+                tv = float(parts[5])          # transversions
             except ValueError:
                 continue
             total_len += L
@@ -1907,6 +1940,26 @@ def _consensus_path_for_outfile(outfile: str) -> str:
     if p.suffix == ".results":
         return str(p.with_suffix(".consensus.fa"))
     return f"{outfile}.consensus.fa"
+
+
+def _internal_path_for_outfile(outfile: str) -> str:
+    """Derive internal-sequence FASTA path from the divergence outfile path.
+    If outfile ends with '.results', replace it with '.internal.fa'; otherwise append '.internal.fa'.
+    """
+    p = Path(outfile)
+    if p.suffix == ".results":
+        return str(p.with_suffix(".internal.fa"))
+    return f"{outfile}.internal.fa"
+
+
+def _density_path_for_outfile(outfile: str) -> str:
+    """Derive the density-plot PDF path from the divergence outfile path.
+    If outfile ends with '.results', replace it with '.density.pdf'; otherwise append '.density.pdf'.
+    """
+    p = Path(outfile)
+    if p.suffix == ".results":
+        return str(p.with_suffix(".density.pdf"))
+    return f"{outfile}.density.pdf"
 
 
 # Hardcoded --min-seq-id sweep. mmseqs easy-cluster is run once per value and
@@ -2037,15 +2090,26 @@ def process_one_input(args_base: argparse.Namespace, in_fasta: str, per_prefix_d
     else:
         open(outfile, "w").close()
 
-    # Optional consensus FASTA output
+    # Optional consensus FASTA output. Built for --ltr-consensus (FASTA only)
+    # and for --ltr-cluster (FASTA + clustering); clustering is gated separately
+    # below so --ltr-consensus alone never shells out to mmseqs.
     consensus_outfile = None
-    if getattr(args_base, "ltr_cluster", False):
+    if getattr(args_base, "ltr_cluster", False) or getattr(args_base, "ltr_consensus", False):
         consensus_outfile = _consensus_path_for_outfile(outfile)
         if args_base.reuse_existing and os.path.exists(consensus_outfile):
             # mirror reuse semantics: keep existing records, append new ones
             pass
         else:
             open(consensus_outfile, "w").close()
+
+    # Optional internal-sequence FASTA output
+    internal_outfile = None
+    if getattr(args_base, "internal_fasta", False):
+        internal_outfile = _internal_path_for_outfile(outfile)
+        if args_base.reuse_existing and os.path.exists(internal_outfile):
+            pass
+        else:
+            open(internal_outfile, "w").close()
 
     # Pick matching domains mapping (None if absent)
     DOMAINS = per_prefix_domains.get(pref)
@@ -2057,6 +2121,7 @@ def process_one_input(args_base: argparse.Namespace, in_fasta: str, per_prefix_d
     ARGS.temp_dir = temp_dir
     ARGS.outfile = outfile
     ARGS.consensus_outfile = consensus_outfile
+    ARGS.internal_outfile = internal_outfile
     ARGS.input_fasta = in_fasta
 
     log_path = outfile + ".log"
@@ -2081,13 +2146,17 @@ def process_one_input(args_base: argparse.Namespace, in_fasta: str, per_prefix_d
         shutil.rmtree(ARGS.temp_dir)
 
     print(f"All sequences processed for {pref}. Output in {ARGS.outfile}")
+    if internal_outfile:
+        print(f"Internal-sequence FASTA in {internal_outfile}")
     if consensus_outfile:
         print(f"LTR consensus FASTA in {consensus_outfile}")
-        cluster_tsvs = _run_mmseqs_cluster(
-            consensus_outfile, args_base.threads, args_base.verbose
-        )
-        for cluster_tsv in cluster_tsvs:
-            print(f"LTR cluster TSV in {cluster_tsv}")
+        # Only --ltr-cluster clusters; --ltr-consensus stops at the FASTA.
+        if getattr(args_base, "ltr_cluster", False):
+            cluster_tsvs = _run_mmseqs_cluster(
+                consensus_outfile, args_base.threads, args_base.verbose
+            )
+            for cluster_tsv in cluster_tsvs:
+                print(f"LTR cluster TSV in {cluster_tsv}")
 
 
 def _process_unbatched(args, domains, log_path, in_fasta, pref):
@@ -2129,6 +2198,7 @@ def _process_unbatched(args, domains, log_path, in_fasta, pref):
     print("", file=sys.stderr)
 
     consensus_fh = open(args.consensus_outfile, "a") if args.consensus_outfile else None
+    internal_fh = open(args.internal_outfile, "a") if getattr(args, "internal_outfile", None) else None
     try:
         with open(args.outfile, "a") as outfh, Pool(
             processes=args.threads,
@@ -2136,18 +2206,23 @@ def _process_unbatched(args, domains, log_path, in_fasta, pref):
             initargs=(args, domains, log_path),
         ) as pool:
             for result_tuple in pool.imap_unordered(process_dir, dirs, chunksize=1):
-                result_line, consensus_record = result_tuple
+                result_line, consensus_record, internal_record = result_tuple
                 if result_line:
                     outfh.write(result_line)
                     outfh.flush()
                 if consensus_record and consensus_fh is not None:
                     consensus_fh.write(consensus_record)
                     consensus_fh.flush()
+                if internal_record and internal_fh is not None:
+                    internal_fh.write(internal_record)
+                    internal_fh.flush()
                 completed += 1
                 last_update = _progress_update(completed, total, start, last_update, update_interval)
     finally:
         if consensus_fh is not None:
             consensus_fh.close()
+        if internal_fh is not None:
+            internal_fh.close()
 
     print("", file=sys.stderr)
 
@@ -2157,7 +2232,8 @@ def _process_batched(args, domains, log_path, in_fasta, pref):
     Batched flow: index the FASTA without writing seq.fa files,
     then materialize and process one batch at a time.
     """
-    batch_size = args.batch_size
+    # In batched mode --purge-subdirs holds the batch size (a positive int).
+    batch_size = args.purge_subdirs
 
     # Step 1: Index — scan only, no files written (except header_map.tsv)
     entries = index_fasta(args.input_fasta, args.temp_dir)
@@ -2177,6 +2253,7 @@ def _process_batched(args, domains, log_path, in_fasta, pref):
     print("", file=sys.stderr)
 
     consensus_fh = open(args.consensus_outfile, "a") if args.consensus_outfile else None
+    internal_fh = open(args.internal_outfile, "a") if getattr(args, "internal_outfile", None) else None
     try:
         # Create pool once, reuse across all batches
         with open(args.outfile, "a") as outfh, Pool(
@@ -2194,19 +2271,24 @@ def _process_batched(args, domains, log_path, in_fasta, pref):
                 # Step 3b: Process this batch
                 batch_dirs = [str(Path(args.temp_dir) / e.safe_name) for e in batch]
                 for result_tuple in pool.imap_unordered(process_dir, batch_dirs, chunksize=1):
-                    result_line, consensus_record = result_tuple
+                    result_line, consensus_record, internal_record = result_tuple
                     if result_line:
                         outfh.write(result_line)
                         outfh.flush()
                     if consensus_record and consensus_fh is not None:
                         consensus_fh.write(consensus_record)
                         consensus_fh.flush()
+                    if internal_record and internal_fh is not None:
+                        internal_fh.write(internal_record)
+                        internal_fh.flush()
                     completed += 1
                     last_update = _progress_update(completed, total, start, last_update, update_interval)
                 # purge_subdirs is active, so process_dir already removed each subdir
     finally:
         if consensus_fh is not None:
             consensus_fh.close()
+        if internal_fh is not None:
+            internal_fh.close()
 
     print("", file=sys.stderr)
 
@@ -2227,188 +2309,237 @@ def _read_header_map(temp_dir):
     return header_map
 
 
+_BRIEF_HELP = """\
+Kmer2LTR -- estimate LTR retrotransposon age from terminal-repeat divergence.
+
+For each element in an LTR-RT FASTA, it locates the two LTRs, aligns them, and
+reports their divergence (a proxy for time since insertion).
+
+Usage:
+  {prog} -i elements.fa                  basic run -> ./LTRs.alns.results
+  {prog} -i elements.fa -D domains.tsv   fast path when LTR lengths are known
+  {prog} -i elements.fa --ltr-cluster    also build + cluster consensus LTRs
+
+Key options:
+  -i  input LTR-RT FASTA(s)              (required)
+  -o  output results table              (default: ./LTRs.alns.results)
+  -D  domains TSV (name + LTR length)   (optional fast path)
+  -u  mutation rate for age estimate    (default: 3e-8)
+  --ltr-consensus / --ltr-cluster       build / build + cluster consensus LTRs
+
+Run  {prog} -h  for the full list of options.
+"""
+
+
 if __name__ == "__main__":
+    prog = os.path.basename(sys.argv[0]) or "Kmer2LTR.py"
     parser = argparse.ArgumentParser(
+        prog=prog,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        usage=(
+            "%(prog)s -i ELEMENTS.fa [-o OUT] [-D DOMAINS.tsv] [options]\n"
+            "       %(prog)s --cluster-only CONSENSUS.fa [options]"
+        ),
         description=(
-            "Process multi-seq LTR-RT FASTA(s) to extract and align LTRs. "
-            "Optionally fast-path known LTR lengths via a domains TSV.\n\n"
-            "Single-input: -t/--temp-dir and -o/--outfile apply as usual.\n"
-            "Multi-input: -t/--temp-dir and -o/--outfile are ignored; per-file temp/out are inferred from the input filename prefix (text before first '.')."
-        )
-    )
-    parser.add_argument(
-        "-k", action="store_true", dest="keep_temp",
-        help="Keep temp directory after processing."
-    )
-    parser.add_argument(
-        "--purge-subdirs", action="store_true", dest="purge_subdirs",
-        help=(
-            "After each sequence directory finishes processing (including skips/errors), "
-            "delete its temp subdirectory to keep file counts low. "
-            "Mutually exclusive with -k/--keep_temp."
-        )
-    )
-    parser.add_argument(
-        "--batch-size", type=int, default=100, dest="batch_size",
-        help=(
-            "When --purge-subdirs is active, only materialize this many seq.fa files "
-            "at a time to limit temp file count. Default: 100. "
-            "Ignored when --purge-subdirs is not set."
-        )
-    )
-    parser.add_argument(
-        "-v", action="store_true", dest="verbose",
-        help="Verbose mode; print each command before executing."
-    )
-    parser.add_argument(
-        "--debug", action="store_true", dest="debug",
-        help=(
-            "Debug mode: implies -v (verbose) and -k (keep temp), and writes "
-            "many per-sequence intermediates under <temp_dir>/<seq>/debug/ "
-            "(kmer pairs, LIS pairs, boundary maths, extracted LTR FASTAs, "
-            "MAFFT/WFA alignments, trimal output, full WFA divergence command "
-            "+ stdout + stderr with the wfa.cpp '-d' flag enabled, IUPAC "
-            "consensus). Adds a startup banner explaining the pipeline. "
-            "Speed is not the goal; this is for diagnosing why two runs disagree "
-            "(domains vs no-domains, --wfa-align vs MAFFT, -k boundary trimming, "
-            "unexpected skips). Incompatible with --purge-subdirs."
-        )
-    )
-    parser.add_argument(
-        "-d", type=int, default=80, dest="dist",
-        help="Minimum distance between kmer pairs (default: 80)."
-    )
-    parser.add_argument(
-        "-l", type=int, default=8, dest="kmin",
-        help="Minimum kmer length (default: 8)."
-    )
-    parser.add_argument(
-        "-U", type=int, default=12, dest="kmax",
-        help="Maximum kmer length (default: 12)."
-    )
-    parser.add_argument(
-        "-u", type=float, default=3e-8, dest="mutation_rate",
-        help="Mutation rate μ (default: 3e-8)."
-    )
-    parser.add_argument(
-        "-f", type=float, default=2.0, dest="std_factor",
-        help="Standard deviation factor for kmer filtering."
-    )
-    parser.add_argument(
-        "-e", type=int, default=120, dest="extension",
-        help="Extension length for LTR extraction (default: 120)."
-    )
-    parser.add_argument(
-        "-t", default="./temp", dest="temp_dir",
-        help="Temporary directory name (single input only; ignored with multiple inputs)."
-    )
-    parser.add_argument(
-        "-o", default="./LTRs.alns.results", dest="outfile",
-        help="Output filename (single input only; ignored with multiple inputs)."
-    )
-    parser.add_argument(
-        "-p", type=int, default=20, dest="threads",
-        help="Number of parallel threads per input (default: 20)."
-    )
-    # in argparse section
-    parser.add_argument(
-        "--reuse-existing", action="store_true", dest="reuse_existing",
-        help="If the per-input results file already exists, only process LTR-RTs missing from it and append."
-    )
-    parser.add_argument(
-        "-D", "--domains", dest="domains_tsvs", nargs="*", default=None,
-        help=(
-            "Optional domains TSV file(s) (format: name\\tLTR_len). "
-            "With a single input, provide one TSV. With multiple inputs, you may supply multiple TSVs; "
-            "each TSV is matched to an input by prefix. Matching uses the TSV filename up to the first '.'; "
-            "if it ends with '_domains', that suffix is ignored for matching."
-        )
-    )
-    parser.add_argument(
-        "--max-win-overdisp", type=float, default=6, dest="max_win_overdisp",
-        help=(
-            "Maximum allowed window overdispersion (win_overdisp). "
-            "Lower values are more specific (aggressive filtering), "
-            "higher values are more sensitive (retains more outputs). "
-            "To disable this filter entirely, pass a very large value "
-            "(e.g. 'inf' or 1e9). "
-            "Default: 6."
-        )
+            "Estimate LTR retrotransposon age from the divergence between an\n"
+            "element's two long terminal repeats (LTRs).\n\n"
+            "For each sequence in the input FASTA, Kmer2LTR locates the 5' and 3'\n"
+            "LTRs (by kmer anchoring, or directly from a domains TSV), aligns\n"
+            "them, trims unreliable termini, and reports their divergence plus a\n"
+            "mutation-rate-scaled age estimate.\n\n"
+            "Single input    : -o/-t set the output and temp paths.\n"
+            "Multiple inputs : -o/-t are ignored; per-file paths are derived from\n"
+            "                  each input filename's prefix (text before the first '.')."
+        ),
+        epilog=(
+            "examples:\n"
+            "  # basic divergence run\n"
+            "  %(prog)s -i elements.fa -o elements.results\n\n"
+            "  # use known LTR lengths (fast path), 8 workers\n"
+            "  %(prog)s -i elements.fa -D elements_domains.tsv -p 8\n\n"
+            "  # build consensus LTRs only (no clustering)\n"
+            "  %(prog)s -i elements.fa --ltr-consensus\n\n"
+            "  # build consensus LTRs and cluster them\n"
+            "  %(prog)s -i elements.fa --ltr-cluster\n\n"
+            "  # cluster a pre-existing consensus FASTA\n"
+            "  %(prog)s --cluster-only elements.consensus.fa"
+        ),
     )
 
-    parser.add_argument(
-        "--min-retained-fraction", type=float, default=0.6, dest="min_retained_fraction",
-        help=(
-            "Minimum fraction of ungapped columns retained after trimming required to proceed. "
-            "Higher values are more specific (aggressive filtering), "
-            "lower values are more sensitive (retains more outputs). "
-            "To disable this filter entirely, pass 0. "
-            "Default: 0.6."
-        )
+    # --- input / output --------------------------------------------------- #
+    g_io = parser.add_argument_group("input / output")
+    g_io.add_argument(
+        "-i", "--input-fastas", nargs="+", required=False, default=None,
+        help="Input LTR-RT FASTA file(s), each containing many elements. "
+             "Required unless --cluster-only is given. Multiple inputs are "
+             "processed independently."
     )
-    parser.add_argument(
-        "--assume-duplicate-same-ltr", action="store_true", dest="assume_dup_same_ltr",
-        help=(
-            "Override duplicate-header safety fallback in fast path. "
-            "Assumes all duplicate header tokens share the same LTR length from the domains TSV. Use with caution."
-        )
+    g_io.add_argument(
+        "-o", default=None, dest="outfile",
+        help="Output results table (single input only; ignored with multiple "
+             "inputs). Default: <input-prefix>.LTRs.alns.results, derived from "
+             "the input filename."
     )
-    parser.add_argument(
-        "--no-plot", action="store_true", dest="no_plot",
-        help="Disable plotting of results into kmer2ltr_density.pdf."
+    g_io.add_argument(
+        "-t", default=None, dest="temp_dir",
+        help="Temp working directory (single input only; ignored with multiple "
+             "inputs). Default: <input-prefix>_temp. Point this at fast local "
+             "scratch on HPC."
     )
-    parser.add_argument(
+
+    # --- LTR detection & divergence -------------------------------------- #
+    g_detect = parser.add_argument_group("LTR detection & divergence")
+    g_detect.add_argument(
+        "-D", "--domains", dest="domains_tsvs", nargs="*", default=None,
+        help="Domains TSV(s): two columns, element name and LTR length. Enables "
+             "the fast path (cut LTRs at the given length instead of searching). "
+             "One TSV per input, matched by filename prefix; a trailing "
+             "'_domains' is ignored when matching."
+    )
+    g_detect.add_argument(
+        "-u", type=float, default=3e-8, dest="mutation_rate",
+        help="Neutral mutation rate (mu) used to convert divergence to age. "
+             "Default: 3e-8."
+    )
+    g_detect.add_argument(
+        "-e", type=int, default=120, dest="extension",
+        help="Extra bp kept on each LTR end before alignment, to anchor diverged "
+             "termini. Default: 120."
+    )
+    g_detect.add_argument(
         "--wfa-align", action="store_true", dest="wfa_align",
-        help=(
-            "Use WFA instead of mafft for pairwise LTR alignment. "
-            "Much faster (~30-50x) but uses a different alignment algorithm, "
-            "so divergence estimates may differ slightly. "
-            "Default: use mafft."
-        )
+        help="Align LTR pairs with WFA instead of MAFFT (~30-50x faster; "
+             "divergence may differ slightly). Cannot be combined with consensus "
+             "building. Default: MAFFT."
     )
-    parser.add_argument(
+
+    # --- quality filters (both disabled by default) ---------------------- #
+    g_filter = parser.add_argument_group("quality filters (disabled by default)")
+    g_filter.add_argument(
+        "--max-win-overdisp", type=float, default=float("inf"),
+        dest="max_win_overdisp",
+        help="Drop elements whose substitutions are too clumped along the "
+             "alignment (windowed overdispersion). Disabled by default; try 6 "
+             "to enable. Lower = more aggressive filtering."
+    )
+    g_filter.add_argument(
+        "--min-retained-fraction", type=float, default=0.0,
+        dest="min_retained_fraction",
+        help="Require at least this fraction of alignment columns to survive "
+             "trimming, else drop the element. Disabled by default (0); try 0.6 "
+             "to enable. Higher = more aggressive filtering."
+    )
+
+    # --- consensus & clustering ------------------------------------------ #
+    g_cons = parser.add_argument_group("consensus & clustering")
+    g_cons.add_argument(
+        "--ltr-consensus", action="store_true", dest="ltr_consensus",
+        help="Build a FASTA of IUPAC consensus LTRs (one per element; headers "
+             "match the input). Requires MAFFT (not --wfa-align). Output: "
+             "<outfile>.consensus.fa. Does not cluster."
+    )
+    g_cons.add_argument(
         "--ltr-cluster", action="store_true", dest="ltr_cluster",
-        help=(
-            "Build a FASTA of IUPAC consensus LTRs (one per input LTR-RT) AND cluster "
-            "them with mmseqs easy-cluster. "
-            "Consensus pipeline: MAFFT -> trimal -> WFA realignment of trimmed LTRs -> "
-            "IUPAC consensus; headers match the input LTR-RT FASTA exactly. "
-            "Clustering parameters were chosen via a large grid search benchmarked on "
-            "Arabidopsis LTR annotations to jointly minimize singletons and "
-            "cross-family clusters. mmseqs is run once per --min-seq-id in a "
-            "hardcoded sweep (0.70..0.98) and every cluster TSV is kept, since "
-            "different --min-seq-id values cluster at different depths "
-            "(superfamily/lineage -> family -> clade -> recent burst). "
-            "Single-input outputs: <outfile>.consensus.fa and "
-            "<outfile>.consensus_id<min-seq-id>_cluster.tsv (with .results replaced). "
-            "Multi-input outputs: <prefix>.LTRs.alns.consensus.fa and "
-            "<prefix>.LTRs.alns.consensus_id<min-seq-id>_cluster.tsv per input. "
-            "Requires mmseqs in PATH. Not compatible with --wfa-align."
-        )
+        help="Build consensus LTRs (as --ltr-consensus) AND cluster them with "
+             "mmseqs across a fixed --min-seq-id sweep (0.70-0.98), writing one "
+             "<outfile>.consensus_id<id>_cluster.tsv per identity. Requires "
+             "mmseqs in PATH; not compatible with --wfa-align."
     )
-    parser.add_argument(
+    g_cons.add_argument(
         "--cluster-only", dest="cluster_only", metavar="CONSENSUS_FASTA",
-        help=(
-            "Skip the entire LTR extraction/consensus pipeline and run only the "
-            "mmseqs --min-seq-id sweep (see --ltr-cluster) on this pre-existing "
-            "IUPAC consensus FASTA. Writes <CONSENSUS_FASTA stem>_id<min-seq-id>"
-            "_cluster.tsv next to the input. With this set, -i/--input-fastas is "
-            "not required and all other pipeline options are ignored. "
-            "Requires mmseqs in PATH."
-        )
+        help="Skip the whole pipeline and only run the mmseqs --min-seq-id sweep "
+             "on an existing consensus FASTA, writing <stem>_id<id>_cluster.tsv "
+             "alongside it. -i is not required; other options are ignored. "
+             "Requires mmseqs in PATH."
     )
-    parser.add_argument(
-        "-i", "--input-fastas",
-        nargs="+", required=False, default=None,
-        help=("Path(s) to multi-sequence LTR-RT FASTA file(s). "
-              "Required unless --cluster-only is given.")
+    g_cons.add_argument(
+        "--internal-fasta", action="store_true", dest="internal_fasta",
+        help="Also write each element's internal (between-LTR) sequence to "
+             "<outfile>.internal.fa, and append the 5'/3' LTR boundary positions "
+             "as two extra columns of the results table."
     )
-#    parser.add_argument(
-#        "input_fastas", nargs="+",
-#        help="Path(s) to multi-sequence LTR-RT FASTA file(s)."
-#    )
+
+    # --- kmer boundary tuning (advanced) --------------------------------- #
+    g_kmer = parser.add_argument_group("kmer boundary tuning (advanced)")
+    g_kmer.add_argument(
+        "--kmer-range", nargs=2, type=int, default=[8, 12],
+        metavar=("MIN", "MAX"), dest="kmer_range",
+        help="kmer length range (MIN MAX) used to anchor LTR boundaries. "
+             "Default: 8 12."
+    )
+    g_kmer.add_argument(
+        "-d", type=int, default=80, dest="dist",
+        help="Minimum bp between the two copies of a shared kmer. Default: 80."
+    )
+    g_kmer.add_argument(
+        "-f", type=float, default=2.0, dest="std_factor",
+        help="Std-dev factor for kmer-pair filtering. Default: 2.0."
+    )
+
+    # --- performance & temp files ---------------------------------------- #
+    g_perf = parser.add_argument_group("performance & temp files")
+    g_perf.add_argument(
+        "-p", type=int, default=20, dest="threads",
+        help="Parallel worker processes per input. Default: 20."
+    )
+    g_perf.add_argument(
+        "-k", action="store_true", dest="keep_temp",
+        help="Keep the temp directory after finishing (default: delete it)."
+    )
+    g_perf.add_argument(
+        "--purge-subdirs", nargs="?", type=int, const=100, default=None,
+        metavar="N", dest="purge_subdirs",
+        help="Delete each element's temp subdir as soon as it finishes, to keep "
+             "file counts low (helps with very large inputs). Optionally give N "
+             "to also cap how many element files are materialized at once (bare "
+             "flag = 100). Disabled by default; mutually exclusive with -k."
+    )
+    g_perf.add_argument(
+        "--reuse-existing", action="store_true", dest="reuse_existing",
+        help="Resume: keep an existing results file and only process the "
+             "elements missing from it, appending the rest."
+    )
+    g_perf.add_argument(
+        "--assume-duplicate-same-ltr", action="store_true",
+        dest="assume_dup_same_ltr",
+        help="Fast path only: assume duplicate headers share one LTR length from "
+             "the domains TSV (skips a safety fallback). Use with caution."
+    )
+
+    # --- diagnostics ----------------------------------------------------- #
+    g_diag = parser.add_argument_group("diagnostics")
+    g_diag.add_argument(
+        "-v", action="store_true", dest="verbose",
+        help="Verbose: echo each command before running it."
+    )
+    g_diag.add_argument(
+        "--debug", action="store_true", dest="debug",
+        help="Debug: implies -v and -k, prints a pipeline banner, and writes "
+             "per-element intermediates under <temp>/<seq>/debug/ (kmer pairs, "
+             "alignments, trimal, WFA stats). Slow; for diagnosing disagreements "
+             "or unexpected skips. Not compatible with --purge-subdirs."
+    )
+    g_diag.add_argument(
+        "--no-plot", action="store_true", dest="no_plot",
+        help="Skip the divergence density plot (single input: "
+             "<outfile-stem>.density.pdf; multiple inputs: kmer2ltr_density.pdf)."
+    )
+
+    # No arguments at all: print a short, friendly summary and exit.
+    if len(sys.argv) == 1:
+        print(_BRIEF_HELP.format(prog=prog))
+        sys.exit(0)
 
     args = parser.parse_args()
+
+    # --kmer-range MIN MAX -> internal kmin/kmax (rest of the code is unchanged).
+    args.kmin, args.kmax = args.kmer_range
+    if args.kmin < 1 or args.kmin > args.kmax:
+        parser.error("--kmer-range MIN MAX requires 1 <= MIN <= MAX.")
+
+    # --purge-subdirs is either disabled (None) or a positive batch size (int).
+    if args.purge_subdirs is not None and args.purge_subdirs < 1:
+        parser.error("--purge-subdirs N requires N >= 1.")
 
     # --debug overrides perf-oriented flags so we keep everything for inspection.
     if args.debug:
@@ -2425,10 +2556,10 @@ if __name__ == "__main__":
     if args.keep_temp and args.purge_subdirs:
         parser.error("Options -k/--keep_temp and --purge-subdirs are mutually exclusive.")
 
-    # Enforce mutual exclusivity: ltr_cluster vs wfa_align
-    if args.ltr_cluster and args.wfa_align:
-        parser.error("--ltr-cluster and --wfa-align are mutually exclusive: "
-                     "the consensus + clustering pipeline requires the initial alignment to be MAFFT.")
+    # Enforce mutual exclusivity: consensus building vs wfa_align
+    if (args.ltr_cluster or args.ltr_consensus) and args.wfa_align:
+        parser.error("--ltr-consensus/--ltr-cluster are incompatible with --wfa-align: "
+                     "consensus building requires the pairwise alignment to be MAFFT.")
 
     # --ltr-cluster and --cluster-only both shell out to mmseqs; fail fast if
     # it isn't installed.
@@ -2454,8 +2585,17 @@ if __name__ == "__main__":
 
     # Multi-input mode check and warnings for -t/-o
     multi_mode = len(args.input_fastas) > 1
-    if multi_mode and (args.temp_dir != "./temp" or args.outfile != "./LTRs.alns.results"):
-        print("[WARN] Multiple inputs provided; -t/--temp-dir and -o/--outfile are ignored.", file=sys.stderr)
+    if multi_mode:
+        if args.temp_dir is not None or args.outfile is not None:
+            print("[WARN] Multiple inputs provided; -t/--temp-dir and -o/--outfile are ignored.", file=sys.stderr)
+    else:
+        # Single input: default -o/-t to the input filename prefix (matching
+        # multi-input behavior), so separate runs in one directory don't collide.
+        pref0 = prefix_before_dot(args.input_fastas[0])
+        if args.outfile is None:
+            args.outfile = f"{pref0}.LTRs.alns.results"
+        if args.temp_dir is None:
+            args.temp_dir = f"{pref0}_temp"
 
     # Build per-prefix domains mapping
     per_prefix_domains: dict[str, dict[str, int] | None] = {}
@@ -2485,12 +2625,16 @@ if __name__ == "__main__":
         if not result_files:
             print("[PLOT] No results found to plot; skipping.", file=sys.stderr)
         else:
+            # Single input: recycle the -o prefix (<stem>.density.pdf). Multiple
+            # inputs: -o is ignored, so fall back to a fixed generic name.
+            plot_out = ("kmer2ltr_density.pdf" if multi_mode
+                        else _density_path_for_outfile(args.outfile))
             plot_cmd = [
                 sys.executable, str(SCRIPT_DIR / "plot_density.py"),
                 "-in", *result_files,
                 "-model", "K2P",
                 "-miu", str(args.mutation_rate),
-                "-out", "kmer2ltr_density.pdf",
+                "-out", plot_out,
                 "--xmax", "0.2",
                 "--bins", "auto",
                 "--label-peaks"
@@ -2498,6 +2642,6 @@ if __name__ == "__main__":
             if args.verbose:
                 print("Running:", " ".join(map(str, plot_cmd)))
             subprocess.run(plot_cmd, check=True)
-            print("Density plot saved as kmer2ltr_density.pdf")
+            print(f"Density plot saved as {plot_out}")
     else:
         print("Skipping plotting step (--no-plot).")
