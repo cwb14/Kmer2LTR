@@ -527,14 +527,14 @@ def _build_iupac_consensus_pairwise(aligned_fasta_str: str):
     return ''.join(out)
 
 
-def _build_consensus_from_trimmed(clean_data: str, full_header: str, verbose: bool, debug_dir=None):
+def _consensus_seq_from_trimmed(clean_data: str, verbose: bool, full_header: str = "", debug_dir=None):
     """
-    Build an IUPAC consensus FASTA record from a trimal-cleaned 2-sequence alignment.
-    Pipeline: strip gaps, re-align with WFA, compute IUPAC consensus.
-    Returns the FASTA record (with trailing newline), or None on failure.
+    Compute the IUPAC consensus *sequence* from a trimal-cleaned 2-sequence
+    alignment. Pipeline: strip gaps, re-align with WFA, compute IUPAC consensus.
+    Returns the consensus string, or None on failure.
 
-    debug_dir: optional Path; when set, retain
-        10_consensus_realign.fa  (WFA realignment of the ungapped trimmed LTRs)
+    full_header is used only for log messages. debug_dir: optional Path; when
+    set, retain 10_consensus_realign.fa (WFA realignment of the ungapped LTRs).
     """
     ungapped = _strip_gaps_fasta(clean_data)
     try:
@@ -556,7 +556,98 @@ def _build_consensus_from_trimmed(clean_data: str, full_header: str, verbose: bo
             _debug_log(debug_dir,
                        "[CONSENSUS] _build_iupac_consensus_pairwise returned None (parsing/length mismatch).")
         return None
+    return cons
+
+
+def _build_consensus_from_trimmed(clean_data: str, full_header: str, verbose: bool, debug_dir=None):
+    """
+    Build an IUPAC consensus FASTA record from a trimal-cleaned 2-sequence
+    alignment. Returns the FASTA record (with trailing newline), or None on
+    failure. Thin wrapper over _consensus_seq_from_trimmed that adds the header.
+    """
+    cons = _consensus_seq_from_trimmed(clean_data, verbose, full_header, debug_dir=debug_dir)
+    if not cons:
+        return None
     return f">{full_header}\n{cons}\n"
+
+
+def _make_perfect_ltr_rt_records(header_token, internal_seq, five_p_ltr, three_p_ltr,
+                                 consensus_seq, modes):
+    """
+    Build 'perfect' (unmutated) LTR-RT FASTA records: a single LTR copy flanking
+    the internal sequence on both ends, so the element's two LTRs are identical
+    (as at the time of insertion).
+
+      5p        -> 5' LTR on both ends
+      3p        -> 3' LTR on both ends
+      consensus -> IUPAC consensus LTR on both ends
+
+    Header is '{header_token}~LTRlen:{flank_len}'. Returns {mode: record_str} for
+    the requested modes that could be built; a mode is skipped when its flank is
+    empty/unavailable (e.g. consensus failed) or the internal sequence is empty.
+    """
+    if not internal_seq:
+        return {}
+    flanks = {"5p": five_p_ltr, "3p": three_p_ltr, "consensus": consensus_seq}
+    records = {}
+    for mode in modes:
+        flank = flanks.get(mode)
+        if not flank:
+            continue
+        records[mode] = (f">{header_token}~LTRlen:{len(flank)}\n"
+                         f"{flank}{internal_seq}{flank}\n")
+    return records
+
+
+def _build_optional_records(seq, end5p, start3p, seq_len, header_token, full_header,
+                            clean_data, verbose, debug_dir):
+    """
+    Build the optional per-element FASTA records gated by ARGS flags: the
+    internal-sequence record (--internal-fasta), the consensus-LTR record
+    (--ltr-consensus/--ltr-cluster), and the perfect-LTR-RT records
+    (--make-perfect-ltr-rt). Shared by both the fast and full pipeline paths.
+
+    end5p/start3p are the 1-based LTR-proper boundaries: the 5' LTR is
+    seq[0:end5p], the 3' LTR is seq[start3p-1:seq_len], the internal region is
+    seq[end5p:start3p-1]. The consensus sequence (if any flag needs it) is
+    computed once here and reused for both the consensus FASTA and the
+    'consensus' perfect mode.
+
+    Returns (consensus_record, internal_record, perfect_records); perfect_records
+    is a {mode: record_str} dict (possibly empty) or None when the feature is off.
+    """
+    perfect_modes = getattr(ARGS, "make_perfect_ltr_rt", None)
+    need_internal = bool(getattr(ARGS, "internal_outfile", None)) or bool(perfect_modes)
+    internal_seq = seq[end5p:start3p - 1] if (need_internal and start3p - 1 > end5p) else ""
+
+    internal_record = None
+    if getattr(ARGS, "internal_outfile", None) and internal_seq:
+        locus = _internal_genomic_locus(header_token, end5p, start3p, seq_len)
+        hdr = f"{header_token}\t{locus}" if locus else header_token
+        internal_record = f">{hdr}\n{internal_seq}\n"
+
+    want_consensus_fa = ((getattr(ARGS, 'ltr_cluster', False) or getattr(ARGS, 'ltr_consensus', False))
+                         and not getattr(ARGS, 'wfa_align', False))
+    want_perfect_cons = (bool(perfect_modes) and "consensus" in perfect_modes
+                         and not getattr(ARGS, 'wfa_align', False))
+    cons_seq = None
+    if want_consensus_fa or want_perfect_cons:
+        cons_seq = _consensus_seq_from_trimmed(clean_data, verbose, full_header, debug_dir=debug_dir)
+
+    consensus_record = None
+    if want_consensus_fa and cons_seq:
+        consensus_record = f">{full_header}\n{cons_seq}\n"
+        if debug_dir is not None:
+            _debug_write(debug_dir, "11_consensus.fa", consensus_record)
+
+    perfect_records = None
+    if perfect_modes:
+        perfect_records = _make_perfect_ltr_rt_records(
+            header_token, internal_seq, seq[0:end5p], seq[start3p - 1:seq_len],
+            cons_seq, perfect_modes,
+        )
+
+    return (consensus_record, internal_record, perfect_records)
 
 
 def _format_hms(seconds: float) -> str:
@@ -1107,7 +1198,7 @@ def _fallback_boundary(seq, seq_len, extension, debug_dir, reason):
             final_len, seq_len - final_len + 1)
 
 
-def _discover_and_extract_ltrs(seq, kmin, kmax, dist, std_factor, extension, debug_dir=None):
+def _discover_and_extract_ltrs(seq, kmin, kmax, dist, extension, debug_dir=None):
     """
     In-process replacement for the jellyfish + map_kmers + filter_kmers + extract_ltrs
     subprocess chain.  Returns (ltr_5p, ltr_3p, end5p, start3p) or None.
@@ -1528,29 +1619,30 @@ def try_fast_path(dir_path: Path, header_token: str, full_header: str, seq_len: 
       - Safety checks
       - Extract first/last min(ltr_len + extension, seq_len//2) bp
       - Run MAFFT -> trimal -> WFA, return result line
-      - Optionally also build an IUPAC consensus from the trimmed LTRs.
+      - Optionally also build an IUPAC consensus and/or perfect LTR-RTs from the LTRs.
 
-    Returns (attempted, (result_line, consensus_record, internal_record)):
-      (False, (None, None, None))           fast-path doesn't apply (caller falls back)
-      (True,  (None, None, None))           fast-path ran but result was filtered/skipped
-      (True,  (result, None, None))         result produced, optional outputs disabled or skipped
-      (True,  (result, consensus, internal))  result and optional records produced
+    Returns (attempted, (result_line, consensus_record, internal_record, perfect_records)):
+      (False, (None, None, None, None))   fast-path doesn't apply (caller falls back)
+      (True,  (None, None, None, None))   fast-path ran but result was filtered/skipped
+      (True,  (result, ...))              result produced, with whatever optional
+                                          records the active flags requested
+    perfect_records is a {mode: record_str} dict (or None when --make-perfect-ltr-rt is off).
     """
     global ARGS, DOMAINS
     if not DOMAINS:
-        return (False, (None, None, None))
+        return (False, (None, None, None, None))
 
     # Duplicate name? -> uncertain mapping -> full pipeline unless user overrides.
     if (dir_path / "DUPLICATE_NAME").exists() and not ARGS.assume_dup_same_ltr:
         if ARGS.verbose:
             print(f"[FAST-PATH SKIP] Duplicate header name detected for '{header_token}'. "
                   f"Use --assume-duplicate-same-ltr to override (risky).")
-        return (False, (None, None, None))
+        return (False, (None, None, None, None))
     # If ARGS.assume_dup_same_ltr is True, proceed assuming all duplicates with this
     # header token share the same LTR length from DOMAINS.
 
     if header_token not in DOMAINS:
-        return (False, (None, None, None))
+        return (False, (None, None, None, None))
 
     ltr_len = DOMAINS[header_token]
 
@@ -1559,7 +1651,7 @@ def try_fast_path(dir_path: Path, header_token: str, full_header: str, seq_len: 
         if ARGS.verbose:
             print(f"[FAST-PATH SKIP] Safety check failed for '{header_token}': "
                   f"seq_len={seq_len} <= 2*{ltr_len}+50")
-        return (False, (None, None, None))
+        return (False, (None, None, None, None))
 
     debug_dir = _ensure_debug_dir(dir_path)
     _debug_log(debug_dir,
@@ -1604,7 +1696,7 @@ def try_fast_path(dir_path: Path, header_token: str, full_header: str, seq_len: 
     except subprocess.CalledProcessError:
         print(f"[SKIP] mafft failed for {dir_path.name}")
         _debug_log(debug_dir, "[FAST] alignment step failed.")
-        return (True, (None, None, None))
+        return (True, (None, None, None, None))
 
     aligner_name = "WFA (--wfa-align)" if getattr(ARGS, "wfa_align", False) else "MAFFT --auto"
     _debug_write(debug_dir, "05_alignment.fa", aln_data)
@@ -1617,7 +1709,7 @@ def try_fast_path(dir_path: Path, header_token: str, full_header: str, seq_len: 
     except subprocess.CalledProcessError:
         print(f"[SKIP] trimal failed for {dir_path.name}")
         _debug_log(debug_dir, "[FAST] trimal step failed.")
-        return (True, (None, None, None))
+        return (True, (None, None, None, None))
 
     _debug_write(debug_dir, "06_trimal.fa", clean_data)
     _debug_log(debug_dir, "trimal -automated1 -keepheader written to 06_trimal.fa.")
@@ -1634,7 +1726,7 @@ def try_fast_path(dir_path: Path, header_token: str, full_header: str, seq_len: 
         _debug_log(debug_dir,
                    f"[FAST] SKIP: clean_bp({clean_bp}) + ext({ARGS.extension}) "
                    f"<= {ARGS.min_retained_fraction:.3f} * raw_bp({raw_bp:.0f}).")
-        return (True, (None, None, None))  # fast-path executed, but result skipped
+        return (True, (None, None, None, None))  # fast-path executed, but result skipped
 
     # Fast-path: use DOMAINS_TSV value directly, do NOT subtract extension
     reported_len = ltr_len
@@ -1652,6 +1744,7 @@ def try_fast_path(dir_path: Path, header_token: str, full_header: str, seq_len: 
 
     consensus_record = None
     internal_record = None
+    perfect_records = None
     if result is not None:
         # Fast-path LTR boundaries come directly from the domains TSV: the
         # 5' LTR proper is bp 1..ltr_len, the 3' LTR proper is bp
@@ -1660,18 +1753,12 @@ def try_fast_path(dir_path: Path, header_token: str, full_header: str, seq_len: 
         end5p = ltr_len
         start3p = seq_len - ltr_len + 1
         result = result.rstrip("\n") + f"\t{end5p}\t{start3p}\n"
-        if getattr(ARGS, "internal_outfile", None):
-            internal_seq = seq[end5p:start3p - 1]
-            if internal_seq:
-                locus = _internal_genomic_locus(header_token, end5p, start3p, seq_len)
-                hdr = f"{header_token}\t{locus}" if locus else header_token
-                internal_record = f">{hdr}\n{internal_seq}\n"
-        if (getattr(ARGS, 'ltr_cluster', False) or getattr(ARGS, 'ltr_consensus', False)) and not getattr(ARGS, 'wfa_align', False):
-            consensus_record = _build_consensus_from_trimmed(clean_data, full_header, ARGS.verbose, debug_dir=debug_dir)
-            if debug_dir is not None and consensus_record:
-                _debug_write(debug_dir, "11_consensus.fa", consensus_record)
+        consensus_record, internal_record, perfect_records = _build_optional_records(
+            seq, end5p, start3p, seq_len, header_token, full_header,
+            clean_data, ARGS.verbose, debug_dir,
+        )
 
-    return (True, (result, consensus_record, internal_record))
+    return (True, (result, consensus_record, internal_record, perfect_records))
 
 
 def process_dir(dir_path):
@@ -1684,8 +1771,8 @@ def process_dir(dir_path):
     When ARGS.purge_subdirs is enabled, the per-sequence temp directory is removed
     at the end of processing (even if skipped or errors occur).
 
-    Always returns a tuple (divergence_line, consensus_record, internal_record);
-    any element may be None.
+    Always returns a tuple (divergence_line, consensus_record, internal_record,
+    perfect_records); any element may be None.
     """
     dir_path = Path(dir_path)
 
@@ -1695,7 +1782,6 @@ def process_dir(dir_path):
         dist = args.dist
         kmin = args.kmin
         kmax = args.kmax
-        std_factor = args.std_factor
         extension = args.extension
 
         if ARGS.verbose:
@@ -1715,7 +1801,7 @@ def process_dir(dir_path):
                 pass
             d = _ensure_debug_dir(dir_path)
             _debug_log(d, f"=== SKIPPED.too_short ===\nseq_len={seq_len} < MIN_SEQ_BP={MIN_SEQ_BP}.")
-            return (None, None, None)
+            return (None, None, None, None)
 
         # ===== FAST-PATH TRY =====
         try:
@@ -1734,7 +1820,7 @@ def process_dir(dir_path):
                    f"seq_len: {seq_len}\n"
                    f"kmin: {kmin}  kmax: {kmax}  dist: {dist}  extension: {extension}\n")
 
-        ltr_result = _discover_and_extract_ltrs(seq, kmin, kmax, dist, std_factor, extension, debug_dir=debug_dir)
+        ltr_result = _discover_and_extract_ltrs(seq, kmin, kmax, dist, extension, debug_dir=debug_dir)
         if ltr_result is None:
             log_msg(f"[SKIP] No valid kmer pairs for {dir_path.name}.")
             try:
@@ -1742,7 +1828,7 @@ def process_dir(dir_path):
             except Exception:
                 pass
             _debug_log(debug_dir, "[FULL] No filtered kmer pairs; sequence skipped.")
-            return (None, None, None)
+            return (None, None, None, None)
 
         ltr_5p, ltr_3p, end5p_raw, start3p_raw = ltr_result
         fasta_str = (f">{full_header}\t5p:1-{end5p_raw}\n{ltr_5p}\n"
@@ -1759,7 +1845,7 @@ def process_dir(dir_path):
         except subprocess.CalledProcessError:
             print(f"[SKIP] mafft failed for {dir_path.name}")
             _debug_log(debug_dir, "[FULL] alignment step failed.")
-            return (None, None, None)
+            return (None, None, None, None)
 
         aligner_name = "WFA (--wfa-align)" if getattr(ARGS, "wfa_align", False) else "MAFFT --auto"
         _debug_write(debug_dir, "05_alignment.fa", aln_data)
@@ -1772,7 +1858,7 @@ def process_dir(dir_path):
         except subprocess.CalledProcessError:
             print(f"[SKIP] trimal failed for {dir_path.name}")
             _debug_log(debug_dir, "[FULL] trimal step failed.")
-            return (None, None, None)
+            return (None, None, None, None)
 
         _debug_write(debug_dir, "06_trimal.fa", clean_data)
         _debug_log(debug_dir, "trimal -automated1 -keepheader written to 06_trimal.fa.")
@@ -1791,7 +1877,7 @@ def process_dir(dir_path):
             _debug_log(debug_dir,
                        f"[FULL] SKIP: clean_bp({clean_bp}) + ext({extension}) "
                        f"<= {args.min_retained_fraction:.3f} * raw_bp({raw_bp:.0f}).")
-            return (None, None, None)
+            return (None, None, None, None)
 
         # Reported LTR length = column count of the trimal-trimmed pairwise
         # alignment. MAFFT aligned (5'LTR+flank) vs (3'LTR+flank); the
@@ -1833,6 +1919,7 @@ def process_dir(dir_path):
 
         consensus_record = None
         internal_record = None
+        perfect_records = None
         if result is not None:
             # _discover_and_extract_ltrs returns boundaries that include the
             # --extension flank on the inner side. Back the extension out to
@@ -1843,18 +1930,12 @@ def process_dir(dir_path):
             end5p = max(1, end5p_raw - extension)
             start3p = min(seq_len, start3p_raw + extension)
             result = result.rstrip("\n") + f"\t{end5p}\t{start3p}\n"
-            if getattr(ARGS, "internal_outfile", None):
-                internal_seq = seq[end5p:start3p - 1] if start3p - 1 > end5p else ""
-                if internal_seq:
-                    locus = _internal_genomic_locus(header_token, end5p, start3p, seq_len)
-                    hdr = f"{header_token}\t{locus}" if locus else header_token
-                    internal_record = f">{hdr}\n{internal_seq}\n"
-            if (getattr(ARGS, 'ltr_cluster', False) or getattr(ARGS, 'ltr_consensus', False)) and not getattr(ARGS, 'wfa_align', False):
-                consensus_record = _build_consensus_from_trimmed(clean_data, full_header, verbose, debug_dir=debug_dir)
-                if debug_dir is not None and consensus_record:
-                    _debug_write(debug_dir, "11_consensus.fa", consensus_record)
+            consensus_record, internal_record, perfect_records = _build_optional_records(
+                seq, end5p, start3p, seq_len, header_token, full_header,
+                clean_data, verbose, debug_dir,
+            )
 
-        return (result, consensus_record, internal_record)
+        return (result, consensus_record, internal_record, perfect_records)
 
     finally:
         # Always try to remove the subdir if purge_subdirs is enabled
@@ -1983,6 +2064,16 @@ def _internal_path_for_outfile(outfile: str) -> str:
     if p.suffix == ".results":
         return str(p.with_suffix(".internal.fa"))
     return f"{outfile}.internal.fa"
+
+
+def _perfect_path_for_outfile(outfile: str, mode: str) -> str:
+    """Derive a perfect-LTR-RT FASTA path (one per mode) from the divergence outfile path.
+    If outfile ends with '.results', replace it with '.perfect_<mode>.fa'; otherwise append.
+    """
+    p = Path(outfile)
+    if p.suffix == ".results":
+        return str(p.with_suffix(f".perfect_{mode}.fa"))
+    return f"{outfile}.perfect_{mode}.fa"
 
 
 def _density_path_for_outfile(outfile: str) -> str:
@@ -2144,6 +2235,17 @@ def process_one_input(args_base: argparse.Namespace, in_fasta: str, per_prefix_d
         else:
             open(internal_outfile, "w").close()
 
+    # Optional perfect (unmutated) LTR-RT FASTA output(s): one file per requested
+    # mode (5p / 3p / consensus), keyed by mode -> path.
+    perfect_outfiles = {}
+    for mode in (getattr(args_base, "make_perfect_ltr_rt", None) or []):
+        path = _perfect_path_for_outfile(outfile, mode)
+        perfect_outfiles[mode] = path
+        if args_base.reuse_existing and os.path.exists(path):
+            pass
+        else:
+            open(path, "w").close()
+
     # Pick matching domains mapping (None if absent)
     DOMAINS = per_prefix_domains.get(pref)
     if args_base.domains_tsvs and multi_mode and DOMAINS is None:
@@ -2155,6 +2257,7 @@ def process_one_input(args_base: argparse.Namespace, in_fasta: str, per_prefix_d
     ARGS.outfile = outfile
     ARGS.consensus_outfile = consensus_outfile
     ARGS.internal_outfile = internal_outfile
+    ARGS.perfect_outfiles = perfect_outfiles
     ARGS.input_fasta = in_fasta
 
     log_path = outfile + ".log"
@@ -2181,6 +2284,8 @@ def process_one_input(args_base: argparse.Namespace, in_fasta: str, per_prefix_d
     print(f"All sequences processed for {pref}. Output in {ARGS.outfile}")
     if internal_outfile:
         print(f"Internal-sequence FASTA in {internal_outfile}")
+    for mode, path in perfect_outfiles.items():
+        print(f"Perfect LTR-RT FASTA ({mode}) in {path}")
     if consensus_outfile:
         print(f"LTR consensus FASTA in {consensus_outfile}")
         # Only --ltr-cluster clusters; --ltr-consensus stops at the FASTA.
@@ -2232,6 +2337,7 @@ def _process_unbatched(args, domains, log_path, in_fasta, pref):
 
     consensus_fh = open(args.consensus_outfile, "a") if args.consensus_outfile else None
     internal_fh = open(args.internal_outfile, "a") if getattr(args, "internal_outfile", None) else None
+    perfect_fhs = {m: open(p, "a") for m, p in (getattr(args, "perfect_outfiles", None) or {}).items()}
     try:
         with open(args.outfile, "a") as outfh, Pool(
             processes=args.threads,
@@ -2239,7 +2345,7 @@ def _process_unbatched(args, domains, log_path, in_fasta, pref):
             initargs=(args, domains, log_path),
         ) as pool:
             for result_tuple in pool.imap_unordered(process_dir, dirs, chunksize=1):
-                result_line, consensus_record, internal_record = result_tuple
+                result_line, consensus_record, internal_record, perfect_records = result_tuple
                 if result_line:
                     outfh.write(result_line)
                     outfh.flush()
@@ -2249,6 +2355,12 @@ def _process_unbatched(args, domains, log_path, in_fasta, pref):
                 if internal_record and internal_fh is not None:
                     internal_fh.write(internal_record)
                     internal_fh.flush()
+                if perfect_records:
+                    for _m, _rec in perfect_records.items():
+                        _fh = perfect_fhs.get(_m)
+                        if _fh is not None and _rec:
+                            _fh.write(_rec)
+                            _fh.flush()
                 completed += 1
                 last_update = _progress_update(completed, total, start, last_update, update_interval)
     finally:
@@ -2256,6 +2368,8 @@ def _process_unbatched(args, domains, log_path, in_fasta, pref):
             consensus_fh.close()
         if internal_fh is not None:
             internal_fh.close()
+        for _fh in perfect_fhs.values():
+            _fh.close()
 
     print("", file=sys.stderr)
 
@@ -2287,6 +2401,7 @@ def _process_batched(args, domains, log_path, in_fasta, pref):
 
     consensus_fh = open(args.consensus_outfile, "a") if args.consensus_outfile else None
     internal_fh = open(args.internal_outfile, "a") if getattr(args, "internal_outfile", None) else None
+    perfect_fhs = {m: open(p, "a") for m, p in (getattr(args, "perfect_outfiles", None) or {}).items()}
     try:
         # Create pool once, reuse across all batches
         with open(args.outfile, "a") as outfh, Pool(
@@ -2304,7 +2419,7 @@ def _process_batched(args, domains, log_path, in_fasta, pref):
                 # Step 3b: Process this batch
                 batch_dirs = [str(Path(args.temp_dir) / e.safe_name) for e in batch]
                 for result_tuple in pool.imap_unordered(process_dir, batch_dirs, chunksize=1):
-                    result_line, consensus_record, internal_record = result_tuple
+                    result_line, consensus_record, internal_record, perfect_records = result_tuple
                     if result_line:
                         outfh.write(result_line)
                         outfh.flush()
@@ -2314,6 +2429,12 @@ def _process_batched(args, domains, log_path, in_fasta, pref):
                     if internal_record and internal_fh is not None:
                         internal_fh.write(internal_record)
                         internal_fh.flush()
+                    if perfect_records:
+                        for _m, _rec in perfect_records.items():
+                            _fh = perfect_fhs.get(_m)
+                            if _fh is not None and _rec:
+                                _fh.write(_rec)
+                                _fh.flush()
                     completed += 1
                     last_update = _progress_update(completed, total, start, last_update, update_interval)
                 # purge_subdirs is active, so process_dir already removed each subdir
@@ -2322,6 +2443,8 @@ def _process_batched(args, domains, log_path, in_fasta, pref):
             consensus_fh.close()
         if internal_fh is not None:
             internal_fh.close()
+        for _fh in perfect_fhs.values():
+            _fh.close()
 
     print("", file=sys.stderr)
 
@@ -2496,6 +2619,18 @@ if __name__ == "__main__":
              "insertion this interval spans the excised insertion and so can be longer "
              "than the internal sequence itself."
     )
+    g_cons.add_argument(
+        "--make-perfect-ltr-rt", dest="make_perfect_ltr_rt", nargs="+",
+        choices=["5p", "3p", "consensus"], default=None,
+        metavar="{5p,3p,consensus}",
+        help="Write FASTA(s) of 'perfect' (unmutated) LTR-RTs: the internal "
+             "sequence flanked on BOTH ends by one identical LTR copy, so the two "
+             "LTRs match as at insertion. Give one or more modes; one output per "
+             "mode: 5p uses the 5' LTR (-> <outfile>.perfect_5p.fa), 3p uses the "
+             "3' LTR (-> .perfect_3p.fa), consensus uses the IUPAC consensus LTR "
+             "(-> .perfect_consensus.fa). Headers gain '~LTRlen:<len>'. 'consensus' "
+             "requires MAFFT (not --wfa-align); 5p/3p work with either aligner."
+    )
 
     # --- kmer boundary tuning (advanced) --------------------------------- #
     g_kmer = parser.add_argument_group("kmer boundary tuning (advanced)")
@@ -2508,10 +2643,6 @@ if __name__ == "__main__":
     g_kmer.add_argument(
         "-d", type=int, default=80, dest="dist",
         help="Minimum bp between the two copies of a shared kmer. Default: 80."
-    )
-    g_kmer.add_argument(
-        "-f", type=float, default=2.0, dest="std_factor",
-        help="Std-dev factor for kmer-pair filtering. Default: 2.0."
     )
 
     # --- performance & temp files ---------------------------------------- #
@@ -2598,6 +2729,12 @@ if __name__ == "__main__":
     if (args.ltr_cluster or args.ltr_consensus) and args.wfa_align:
         parser.error("--ltr-consensus/--ltr-cluster are incompatible with --wfa-align: "
                      "consensus building requires the pairwise alignment to be MAFFT.")
+
+    # --make-perfect-ltr-rt consensus also builds a consensus LTR -> needs MAFFT.
+    if args.make_perfect_ltr_rt and "consensus" in args.make_perfect_ltr_rt and args.wfa_align:
+        parser.error("--make-perfect-ltr-rt consensus is incompatible with --wfa-align: "
+                     "the consensus LTR requires the pairwise alignment to be MAFFT "
+                     "(5p/3p modes work with --wfa-align).")
 
     # --ltr-cluster and --cluster-only both shell out to mmseqs; fail fast if
     # it isn't installed.
