@@ -1,143 +1,254 @@
-#### Pipeline to estimate LTR-RT insertion time.   
-(1) Use kmers to identify LTRs from a library of LTR-RTs.  
-(2) MAFFT and trimal to clean alignments.  
-(2) Force global alignment gapless LTRs.   
-(3) Date with p-dist, JC69, and K2P.  
+# Kmer2LTR
 
-```diff
-Process multi-seq LTR-RT FASTA(s) to extract and align LTRs. 
+Estimate when LTR retrotransposons inserted, from the divergence between their two LTRs.
 
-options:
-  -h, --help            show this help message and exit.
-  -k                Keep temp directory after processing.
-  -v                    Verbose mode; print each command before executing.
-  -d DIST               Minimum distance between kmer pairs (default: 80).
-  -l KMIN               Minimum kmer length (default: 8).
-  -U KMAX               Maximum kmer length (default: 12).
-+ -u MUTATION_RATE      Mutation rate μ (default: 3e-8).
-  -f STD_FACTOR         Standard deviation factor for kmer filtering.
-  -e EXTENSION          Extension length for LTR extraction (default: 65).
-  -t TEMP_DIR           Temporary directory name (single input only; ignored with multiple inputs).
-+ -o OUTFILE            Output filename (single input only; ignored with multiple inputs).
-+ -p THREADS            Number of parallel threads per input (default: 20).
-+ -D [DOMAINS_TSVS ...], --domains [DOMAINS_TSVS ...]
-                        Optional domains TSV file(s) (format: name\tLTR_len). With a single input, provide one TSV. With multiple inputs, you may
-                        supply multiple TSVs; each TSV is matched to an input by prefix. Matching uses the TSV filename up to the first '.'; if
-                        it ends with '_domains', that suffix is ignored for matching.
-  --max-win-overdisp MAX_WIN_OVERDISP
-                        Exclude alignments with window overdispersion (win_overdisp) greater than this value.
-                        Lower = stricter, higher = more permissive. Pass a very large value (e.g. `inf` or `1e9`)
-                        to disable. Default: 6.
-  --min-retained-fraction MIN_RETAINED_FRACTION
-                        Minimum fraction of ungapped columns retained after trimming required to proceed.
-                        Higher = stricter, lower = more permissive. Pass `0` to disable. Default: 0.6.
-  --assume-duplicate-same-ltr
-                        Override duplicate-header safety fallback in fast path. Assumes all duplicate header tokens share the same LTR length
-                        from the domains TSV. Use with caution.
-  --no-plot             Disable plotting of results into kmer2ltr_density.pdf.
-  --ltr-cluster         Build a FASTA of IUPAC consensus LTRs (one per input LTR-RT) AND cluster
-                        them with mmseqs easy-cluster. Consensus pipeline: MAFFT -> trimal ->
-                        WFA realignment of trimmed LTRs -> IUPAC consensus. Clustering parameters
-                        were chosen via grid search on Arabidopsis LTR annotations to jointly
-                        minimize singletons and cross-family clusters; mmseqs easy-cluster beat
-                        cd-hit-est and a wavefront-based pipeline (which doesn't scale past ~2k
-                        LTR-RTs anyway). Consensus LTR FASTA also outperformed full-length LTR-RT
-                        FASTA and 5'-LTR-only FASTA as the clustering input.
-                        Single-input outputs: <outfile>.consensus.fa and <outfile>.consensus_cluster.tsv.
-                        Multi-input outputs: <prefix>.LTRs.alns.consensus.fa and <prefix>.LTRs.alns.consensus_cluster.tsv per input.
-                        Requires mmseqs in PATH. Not compatible with --wfa-align.
-+ -i INPUT_FASTAS [INPUT_FASTAS ...], --input-fastas INPUT_FASTAS [INPUT_FASTAS ...]
-                        Path(s) to multi-sequence LTR-RT FASTA file(s).
+An LTR-RT is born with two identical LTRs (the long terminal repeats at each end).
+After insertion the two copies mutate independently, so the divergence between them is a
+molecular clock: the more they differ, the older the element. Kmer2LTR finds the two LTRs
+in each element, aligns them, measures their divergence, and converts it to an age with a
+neutral mutation rate.
+
+Give it a FASTA of intact LTR-RTs. It returns, per element, the LTR divergence (p-distance,
+JC69, K2P) and the matching age estimate.
+
+## How it works
+
+For each sequence in the input FASTA:
+
+1. **Find the two LTRs.**
+   - *Fast path* (with `-D`/`--domains`): you already know the LTR length, so it just cuts
+     the first and last `LTR_len + extension` bp.
+   - *kmer path* (default): find kmers (length 8–12) that occur in both halves of the
+     element, ≥ `-d` bp apart; keep the collinear set; the kmer spread marks the 5′ and 3′
+     LTR boundaries, symmetrized and padded by `-e` bp.
+2. **Align** the 5′ LTR against the 3′ LTR (MAFFT by default, or WFA with `--wfa-align`).
+3. **Trim** the alignment with trimal, then re-detect the reliable core with WFA (`-k 5 -K`:
+   needs 5 matching bp to enter/leave the trustworthy region, and drops those anchor columns
+   so seeded matches don't inflate identity). This is how ragged, uncertain LTR termini get
+   chopped before counting mutations.
+4. **Score** the divergence (substitutions, transitions/transversions) and convert to age:
+   `age = distance / (2 × mutation_rate)`.
+
+## Install
+
+Kmer2LTR is a single Python script. It shells out to a few standard tools:
+
+| Tool | Needed for | Install |
+|------|-----------|---------|
+| **MAFFT** | alignment (default) | `mamba install -c bioconda mafft` |
+| **trimal** | alignment cleanup (always) | `mamba install -c bioconda trimal` |
+| **mmseqs2** | clustering only (`--ltr-cluster`, `--cluster-only`) | `mamba install -c bioconda mmseqs2` |
+| **numpy + matplotlib** | the density plot (default; skip with `--no-plot`) | `mamba install numpy matplotlib` |
+| **WFA aligner** | divergence scoring (always) | **ships prebuilt** — see below |
+
+Python 3.10+.
+
+```bash
+mamba create -n kmer2ltr -c bioconda -c conda-forge python=3.11 mafft trimal mmseqs2 numpy matplotlib
+mamba activate kmer2ltr
 ```
 
-Most users probably only need the flags that are highlighted in green.
+The WFA aligner is bundled as prebuilt binaries (`wfa_mac`, `wfa_linux1`, `wfa_linux2`) sitting
+next to `Kmer2LTR.py`; the right one is picked automatically for your platform. If none run on
+your machine you'll need to compile `wfa.cpp` against [WFA2-lib](https://github.com/smarco/WFA2-lib)
+(it's not a plain `g++ wfa.cpp` — it links `libwfa2.a`). The shipped binaries cover macOS and Linux,
+so most users never touch this.
 
-Single-file input:
-```
-python Kmer2LTR/Kmer2LTR.py -i test.fa -u 1.8e-8
-```
+## Quick start
 
-Creates `LTRs.alns.results`.
-Output format:
-```
-<LTR-RT>  <LTR_LEN>  <ALN_LEN>  <substitions> <transitions>  <transversions>  <p-dist> <p-time> <JC69-dist> <JC69-time> <K2P-dist>  <K2P-time>
-Gypsy1#LTR_Ty3	584  574	131	109	22	0.228223	3803717	0.272125	4535411	0.290682	4844705
-Gypsy2#LTR_Ty3  260  260	55	47	8	0.211538	3525641	0.248518	4141964	0.264922	4415361
-Gypsy3#LTR_Ty3  741  744	180	137	43	0.241935	4032258	0.292099	4868310	0.308338	5138959
-```
-`LTR_LEN` is whats discovered via kmer (or provided in the domains file).  
-`ALN_LEN` is the length of aligned bases.  
-`LTR_LEN` may be less than or greater than `ALN_LEN`.  
-`LTR_LEN` > `ALN_LEN` if gaps in LTR.   
-`LTR_LEN` < `ALN_LEN` if extension expands the LTR boundry discovered by kmer.   
-
-
-`OUTFILE` can be directly used as `DOMAINS_TSV`.
-
-`LTRs.alns.results.summary` shows the cummulative numbers.
-```
-total_length	22408270
-total_transitions	532951
-total_transversions	217017
-raw_d	0.033468
-JC69_d	0.034238
-K2P_d	0.034368
+```bash
+python Kmer2LTR/Kmer2LTR.py -i elements.fa -u 1.8e-8
 ```
 
+`-u` is the neutral mutation rate (default `3e-8`; use one appropriate for your species).
 
-Multi-file input with 50 threads:
+Writes, using the input prefix (text before the first `.`):
+
 ```
-python Kmer2LTR/Kmer2LTR.py -i species1.ltr.fa species2.ltr.fa species3.ltr.fa -p 50
-```
-
-We could save time if we already know the lengths of the LTR:
-```
-ls *.domains
-species1.ltr.domains  species2.ltr.domains  species3.ltr.domains
-
-
-head -1 species1.ltr.domains
-CMHA_chr1:90368..96317	172
-
-
-# Tells the code that theres an LTR-RT in 'species1.ltr.fa' named 'CMHA_chr1:90368..96317'.
-# Its LTRs are each 172bp in length.
-
-# With domain input, we can save time by skipping LTR identification.
-python Kmer2LTR/Kmer2LTR.py -i species1.ltr.fa species2.ltr.fa species3.ltr.fa -p 50 -D *.domains
+elements.LTRs.alns.results          # one row per element (the main table)
+elements.LTRs.alns.results.summary  # pooled, genome-wide divergence
+elements.LTRs.alns.density.pdf      # divergence / age distribution
+elements_temp/                      # scratch (deleted unless -k)
 ```
 
-- `--max-win-overdisp` and `--min-retained-fraction` are filtration flags to remove candidate LTR-RTs if they appear dubious.    
-  - `--max-win-overdisp` is used to exclude LTR-RTs if their LTRs are inconsistent diveregence. Eg, the 5' half of the LTRs have low divergence, but the 3' half appears quite divergence. This can happen if the LTR boundaries are not accurate. Start with `--max-win-overdisp 6` and lower for additional stringency.  
-  - `--min-retained-fraction` is used to exclude LTR-RTs if the mafft/trimal-cleaned LTRs are shorter than threshold of the kmer-defined LTR boundary. Start with `--min-retained-fraction 0.5` or `--min-retained-fraction 0.6`.  
+## Output
 
-# Developers note.
-TESS-PrinTE makes `lib_clean.fa` with LTR length in the header. All LTRs are unmutated. 
-Other libraries in TESS are also helpful: `maizeTE02052020.ltr.full`, `rice7.0.0.liban.ltr.full`, `ltr-db.fa`, `athrep.updated.fasta_062024.ltr.full`.
+`*.LTRs.alns.results` — one element per line, tab-separated, no header:
 
-For benchmarking the pipeline, I can:
 ```
-python lib_mutator.py -i lib_clean.fa -o lib_clean.15mp.titv2.fa -mp 15 -TiTv 2 --seed 51
-```
-LTRs are 15% mutated. TiTv ratio = 2. 
-Internal sequence is not mutated. 
-
-Runtime.
-With 100 threads, it processes 20,703 LTR-RTs in 25m:22s.
-With DOMAINS_TSV provided, and 100 threads, it processes those 20,703 LTR-RTs in 3m:28s.
-
-Convert pass list to domains file. 
-```
-for f in *.pass.list; do out="${f%.pass.list}.domains"; python pass_list_domians.py "$f" > "$out"; done
+# LTR-RT  LTR_LEN  ALN_LEN  subs  Ti  Tv  p-dist  p-time  JC69-dist  JC69-time  K2P-dist  K2P-time  left_trim  right_trim  end5p  start3p
+Gypsy1#LTR_Ty3  584  574  51  40  11  0.088850  1480833  0.094572  1576200  0.096055  1600917  5  5  584  8210
+Copia3#LTR_Ty1  301  298  19  15   4  0.063758  1062633  0.066666  1111100  0.067383  1123050  4  6  301  4502
 ```
 
-Convert pass list and genome to LTR-RT file:
+- `LTR_LEN` — LTR length used (kmer-discovered, or from the domains file).
+- `ALN_LEN` — length of the aligned, scored region. `LTR_LEN` can be larger (gaps in the LTR)
+  or smaller (the extension expanded the kmer-called boundary).
+- `subs / Ti / Tv` — substitutions, transitions, transversions.
+- `*-dist` — LTR divergence under p-distance, JC69, K2P. `*-time` — the matching age in years.
+- `left_trim / right_trim` — bp the WFA boundary detector chopped off each end.
+- `end5p / start3p` — 1-based coordinates of the last bp of the 5′ LTR and the first bp of the
+  3′ LTR (extension excluded). These mark where the internal region sits.
+
+`*.summary` — pooled over all elements (one molecular clock for the whole set):
+
 ```
+total_length        22408270
+total_transitions   532951
+total_transversions 217017
+raw_d               0.033468
+JC69_d              0.034238
+K2P_d               0.034368
+```
+
+A results file can be fed straight back in as a domains file (`-D`) — column 1 is the name,
+column 2 is the LTR length.
+
+## Fast path: you already know the LTR lengths
+
+If you have the LTR lengths (e.g. from LTR_retriever), skip the kmer search with a **domains
+file** — two tab-separated columns, element name and LTR length:
+
+```bash
+head -1 species1.domains
+CMHA_chr1:90368..96317   172     # this element's LTRs are each 172 bp
+
+python Kmer2LTR/Kmer2LTR.py -i species1.fa -D species1.domains
+```
+
+Much faster, and it removes any uncertainty in the LTR boundaries.
+
+## Many files at once
+
+```bash
+python Kmer2LTR/Kmer2LTR.py -i species1.fa species2.fa species3.fa -p 50
+```
+
+With multiple inputs each file is processed independently and `-o`/`-t` are ignored — outputs
+are named per input (`species1.LTRs.alns.results`, …) and the combined plot is
+`kmer2ltr_density.pdf`. Pass one domains file per input; they're matched by prefix:
+
+```bash
+python Kmer2LTR/Kmer2LTR.py -i species1.fa species2.fa species3.fa -p 50 -D *.domains
+```
+
+`-p` is workers **per input file**.
+
+## Dropping dubious elements
+
+Both filters are **off by default** — turn them on if you want to be strict:
+
+- `--max-win-overdisp` — drop elements whose mutations are clumped unevenly along the LTR
+  (e.g. one half clean, the other half divergent), which usually means the boundaries are
+  wrong. Start at `6` and lower for more stringency.
+- `--min-retained-fraction` — drop elements where trimal threw away too much of the LTR.
+  Start at `0.5`–`0.6`.
+
+## Consensus LTRs & clustering
+
+- `--ltr-consensus` — write one IUPAC consensus LTR per element to `*.consensus.fa`.
+- `--ltr-cluster` — build the consensus FASTA **and** cluster it with mmseqs across a sweep of
+  identity thresholds (0.70 → 0.98), writing one `*.consensus_id<id>_cluster.tsv` per threshold.
+  Low identity lumps elements at the lineage level, high identity splits toward families/recent
+  bursts — different analyses want different depths, so all are kept.
+- `--cluster-only consensus.fa` — just run the clustering sweep on an existing consensus FASTA.
+
+The clustering parameters (`mmseqs easy-cluster`, `-c 0.5 -s 7.5`, etc.) were grid-searched on
+*Arabidopsis* LTR annotations to jointly minimize singletons and cross-family mixing. There,
+mmseqs on the **consensus LTR** beat cd-hit-est, a wavefront pipeline, and both full-length and
+5′-LTR-only inputs. Needs mmseqs in `PATH`; not compatible with `--wfa-align`.
+
+## Extra outputs
+
+- `--internal-fasta` — also write each element's internal (between-LTR) sequence to
+  `*.internal.fa`. When the header carries a `chrom:start-end` locus, the internal record gets
+  the internal region's genomic interval too.
+- `--make-perfect-ltr-rt {5p,3p,consensus}` — write "perfect" (unmutated) LTR-RTs: the internal
+  sequence flanked by two identical LTR copies, as at insertion. One output per mode
+  (`*.perfect_5p.fa`, `*.perfect_3p.fa`, `*.perfect_consensus.fa`). Headers gain `~LTRlen:<len>`.
+
+## All options
+
+Run `python Kmer2LTR/Kmer2LTR.py -h` for the authoritative list. The essentials:
+
+```
+input / output
+  -i, --input-fastas   input LTR-RT FASTA(s)           (required)
+  -o                   results table (single input)    (default: <prefix>.LTRs.alns.results)
+  -t                   temp dir (single input)         (default: <prefix>_temp; point at fast scratch)
+
+LTR detection & divergence
+  -D, --domains        domains TSV(s): name + LTR length (fast path)
+  -u                   mutation rate for age           (default: 3e-8)
+  -e                   bp kept past each LTR end        (default: 120)
+  --wfa-align          align with WFA, not MAFFT (~30-50x faster; slightly different divergence)
+
+quality filters (off by default)
+  --max-win-overdisp   drop elements with clumped mutations   (try 6)
+  --min-retained-fraction  require this fraction to survive trimming  (try 0.6)
+
+consensus & clustering
+  --ltr-consensus      write IUPAC consensus LTRs
+  --ltr-cluster        consensus + mmseqs identity sweep (0.70-0.98)
+  --cluster-only FA    only cluster an existing consensus FASTA
+  --internal-fasta     write internal (between-LTR) sequences
+  --make-perfect-ltr-rt {5p,3p,consensus}  write unmutated LTR-RTs
+
+kmer boundary tuning (advanced)
+  --kmer-range MIN MAX kmer lengths for boundary anchoring   (default: 8 12)
+  -d                   min bp between the two kmer copies     (default: 80)
+
+performance & temp
+  -p                   workers per input                (default: 20)
+  -k                   keep the temp directory
+  --purge-subdirs [N]  delete per-element temp as you go (helps with huge inputs)
+  --reuse-existing     resume: keep existing results, only process what's missing
+  --assume-duplicate-same-ltr   fast-path shortcut for duplicate headers (use with care)
+
+diagnostics
+  -v                   echo each command
+  --debug              full per-element intermediates under <temp>/<seq>/debug/ (slow)
+  --no-plot            skip the density plot
+```
+
+## Helper scripts
+
+Standalone utilities for prepping inputs and post-processing — none are needed for a normal run:
+
+```bash
+# LTR_retriever pass.list  ->  domains file (for -D)
+for f in *.pass.list; do
+  python pass_list_domians.py "$f" > "${f%.pass.list}.domains"
+done
+
+# LTR_retriever pass.list + genome  ->  LTR-RT FASTA
 for tsv in *.pass.list; do
-    prefix="${tsv%.pass.list}"
-    fasta="${prefix}.fa" 
-    out="${tsv}.fa" 
-    python pass_list_fa_extractor.py -fa "$fasta" -tsv "$tsv" > "$out" &
+  python pass_list_fa_extract.py -fa "${tsv%.pass.list}.fa" -tsv "$tsv" > "${tsv}.fa" &
 done
 wait
+
+# Kmer2LTR output  ->  RepeatMasker-style library (>NAME#Class/Superfamily)
+python kmer2ltrfa_to_RMfa.py --fasta elements.fa --tsv elements.tsv \
+    --clean-non-bases --make-perfect-repeat > library.fa
 ```
+
+## Benchmarking & developer notes
+
+**Make a mutated test library** — `lib_mutator.py` mutates only the LTRs (internal sequence left
+alone) at a set rate and Ti/Tv, so you can check recovered divergence against truth. It reads the
+`~LTRlen:<len>` headers that `--make-perfect-ltr-rt` writes:
+
+```bash
+python lib_mutator.py -i perfect.fa -o perfect.15mp.titv2.fa -mp 15 -TiTv 2 --seed 51
+```
+
+**Runtime** (100 workers): ~20,700 LTR-RTs in **25m**. With a domains file (fast path):
+**3.5m**.
+
+**Debugging** — `--debug` keeps every intermediate (kmer pairs, dot plots, alignments, WFA
+boundary calls) under `<temp>/<seq>/debug/`, with a per-element narrative. Use it to see why a
+domains run disagrees with a kmer run, why MAFFT and WFA differ, or why an element was skipped.
+
+**Legacy** — `extract_ltrs.py`, `filter_kmers.py`, and `map_kmers_to_fasta.py` are the original
+standalone kmer/extraction steps. That logic now lives inside `Kmer2LTR.py` (in-process, no
+jellyfish), so these are kept for reference only — they aren't part of the pipeline.
