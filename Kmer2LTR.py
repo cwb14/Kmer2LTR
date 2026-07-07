@@ -2095,18 +2095,27 @@ def _density_path_for_outfile(outfile: str) -> str:
 _MIN_SEQ_ID_SWEEP = (0.70, 0.75, 0.80, 0.85, 0.90, 0.95, 0.98)
 
 
-def _run_mmseqs_cluster(consensus_fasta, threads: int, verbose: bool):
+def _run_mmseqs_cluster(consensus_fasta, threads: int, verbose: bool,
+                        min_seq_id: float = None, coverage: float = 0.5):
     """
-    Cluster the IUPAC consensus LTR FASTA with mmseqs easy-cluster, sweeping
-    --min-seq-id over _MIN_SEQ_ID_SWEEP and retaining one *_cluster.tsv per
-    value. Outputs are named <prefix>_id<min-seq-id>_cluster.tsv (e.g.
-    ..._id0.70_cluster.tsv ... ..._id0.98_cluster.tsv). Auxiliary outputs
-    (*_all_seqs.fasta, *_rep_seq.fasta, and the per-run mmseqs tmp dir) are
-    deleted after each run.
+    Cluster a FASTA (consensus LTRs or internals) with mmseqs easy-cluster.
 
-    Fixed parameters (-c 0.5, --cov-mode 0, --cluster-mode 1, --mask 0,
-    -s 7.5) were chosen via a large grid search benchmarked on Arabidopsis
-    LTR annotations, with the goal of jointly minimizing:
+    By default (min_seq_id is None) --min-seq-id is swept over
+    _MIN_SEQ_ID_SWEEP, retaining one *_cluster.tsv per value. If min_seq_id is
+    given, a single run is performed at that identity instead. Outputs are
+    named <prefix>_id<min-seq-id>_cluster.tsv (e.g. ..._id0.70_cluster.tsv ...
+    ..._id0.98_cluster.tsv). Auxiliary outputs (*_all_seqs.fasta,
+    *_rep_seq.fasta, and the per-run mmseqs tmp dir) are deleted after each run.
+
+    The `coverage` arg maps to mmseqs -c. It defaults to 0.5, the value tuned
+    for consensus LTRs by the grid search below. Internal-sequence clustering
+    passes coverage=0.3: internals have no dedicated tuning, so for now we
+    assume a slightly lower coverage floor than consensus LTRs and lock it at
+    0.3.
+
+    Fixed parameters (--cov-mode 0, --cluster-mode 1, --mask 0, -s 7.5) and the
+    default coverage (-c 0.5) were chosen via a large grid search benchmarked
+    on Arabidopsis LTR annotations, with the goal of jointly minimizing:
       - singletons (single-copy clusters), and
       - family mixing (e.g., a Tork co-clustering with an Ogre is a bad sign;
         Tork co-clustering with Unknown is acceptable).
@@ -2134,8 +2143,9 @@ def _run_mmseqs_cluster(consensus_fasta, threads: int, verbose: bool):
     base_prefix = consensus_fasta.with_suffix("")  # strips final '.fa'
     cluster_tsvs = []
 
-    for min_seq_id in _MIN_SEQ_ID_SWEEP:
-        id_tag = f"{min_seq_id:.2f}"
+    seq_ids = (min_seq_id,) if min_seq_id is not None else _MIN_SEQ_ID_SWEEP
+    for seq_id in seq_ids:
+        id_tag = f"{seq_id:.2f}"
         run_prefix = Path(f"{base_prefix}_id{id_tag}")
         tmp_dir = Path(tempfile.mkdtemp(
             prefix=f"{consensus_fasta.stem}_mmseqs_id{id_tag}_",
@@ -2146,7 +2156,7 @@ def _run_mmseqs_cluster(consensus_fasta, threads: int, verbose: bool):
             "mmseqs", "easy-cluster",
             str(consensus_fasta), str(run_prefix), str(tmp_dir),
             "--min-seq-id", id_tag,
-            "-c", "0.5",
+            "-c", f"{coverage:g}",
             "--cov-mode", "0",
             "--cluster-mode", "1",
             "--mask", "0",
@@ -2226,9 +2236,11 @@ def process_one_input(args_base: argparse.Namespace, in_fasta: str, per_prefix_d
         else:
             open(consensus_outfile, "w").close()
 
-    # Optional internal-sequence FASTA output
+    # Optional internal-sequence FASTA output. Built for --internal-fasta
+    # (FASTA only) and for --internal-cluster (FASTA + clustering); clustering
+    # is gated separately below so --internal-fasta alone never shells out.
     internal_outfile = None
-    if getattr(args_base, "internal_fasta", False):
+    if getattr(args_base, "internal_fasta", False) or getattr(args_base, "internal_cluster", False):
         internal_outfile = _internal_path_for_outfile(outfile)
         if args_base.reuse_existing and os.path.exists(internal_outfile):
             pass
@@ -2284,6 +2296,17 @@ def process_one_input(args_base: argparse.Namespace, in_fasta: str, per_prefix_d
     print(f"All sequences processed for {pref}. Output in {ARGS.outfile}")
     if internal_outfile:
         print(f"Internal-sequence FASTA in {internal_outfile}")
+        # Only --internal-cluster clusters; --internal-fasta stops at the FASTA.
+        # Internals reuse the consensus-LTR clustering verbatim except coverage:
+        # -c 0.3 (vs 0.5), since internals have no dedicated tuning yet.
+        if getattr(args_base, "internal_cluster", False):
+            internal_cluster_tsvs = _run_mmseqs_cluster(
+                internal_outfile, args_base.threads, args_base.verbose,
+                min_seq_id=getattr(args_base, "min_seq_id", None),
+                coverage=0.3,
+            )
+            for cluster_tsv in internal_cluster_tsvs:
+                print(f"Internal cluster TSV in {cluster_tsv}")
     for mode, path in perfect_outfiles.items():
         print(f"Perfect LTR-RT FASTA ({mode}) in {path}")
     if consensus_outfile:
@@ -2291,7 +2314,8 @@ def process_one_input(args_base: argparse.Namespace, in_fasta: str, per_prefix_d
         # Only --ltr-cluster clusters; --ltr-consensus stops at the FASTA.
         if getattr(args_base, "ltr_cluster", False):
             cluster_tsvs = _run_mmseqs_cluster(
-                consensus_outfile, args_base.threads, args_base.verbose
+                consensus_outfile, args_base.threads, args_base.verbose,
+                min_seq_id=getattr(args_base, "min_seq_id", None),
             )
             for cluster_tsv in cluster_tsvs:
                 print(f"LTR cluster TSV in {cluster_tsv}")
@@ -2597,16 +2621,24 @@ if __name__ == "__main__":
     g_cons.add_argument(
         "--ltr-cluster", action="store_true", dest="ltr_cluster",
         help="Build consensus LTRs (as --ltr-consensus) AND cluster them with "
-             "mmseqs across a fixed --min-seq-id sweep (0.70-0.98), writing one "
-             "<outfile>.consensus_id<id>_cluster.tsv per identity. Requires "
-             "mmseqs in PATH; not compatible with --wfa-align."
+             "mmseqs, writing <outfile>.consensus_id<id>_cluster.tsv (one per "
+             "identity in the default 0.70-0.98 sweep, or a single file if "
+             "--min-seq-id is set). Requires mmseqs in PATH; not compatible "
+             "with --wfa-align."
     )
     g_cons.add_argument(
-        "--cluster-only", dest="cluster_only", metavar="CONSENSUS_FASTA",
-        help="Skip the whole pipeline and only run the mmseqs --min-seq-id sweep "
-             "on an existing consensus FASTA, writing <stem>_id<id>_cluster.tsv "
-             "alongside it. -i is not required; other options are ignored. "
-             "Requires mmseqs in PATH."
+        "--cluster-only", dest="cluster_only", metavar="FASTA",
+        help="Skip the whole pipeline and only run mmseqs clustering on an "
+             "existing FASTA (consensus or internal), writing "
+             "<stem>_id<id>_cluster.tsv alongside it. -i is not required; other "
+             "options are ignored. Requires mmseqs in PATH."
+    )
+    g_cons.add_argument(
+        "--min-seq-id", type=float, default=None, dest="min_seq_id",
+        metavar="FLOAT",
+        help="Cluster at this single mmseqs identity (0-1) instead of the "
+             "default 0.70-0.98 sweep. Applies to --ltr-cluster, "
+             "--internal-cluster, and --cluster-only."
     )
     g_cons.add_argument(
         "--internal-fasta", action="store_true", dest="internal_fasta",
@@ -2618,6 +2650,13 @@ if __name__ == "__main__":
              "(the locus shrunk by the 5'/3' LTR lengths); for elements with a nested "
              "insertion this interval spans the excised insertion and so can be longer "
              "than the internal sequence itself."
+    )
+    g_cons.add_argument(
+        "--internal-cluster", action="store_true", dest="internal_cluster",
+        help="Build the internal FASTA (as --internal-fasta) AND cluster it "
+             "with mmseqs, exactly as --ltr-cluster does for consensus LTRs "
+             "(writing <outfile>.internal_id<id>_cluster.tsv). Requires mmseqs "
+             "in PATH; works with --wfa-align."
     )
     g_cons.add_argument(
         "--make-perfect-ltr-rt", dest="make_perfect_ltr_rt", nargs="+",
@@ -2736,11 +2775,19 @@ if __name__ == "__main__":
                      "the consensus LTR requires the pairwise alignment to be MAFFT "
                      "(5p/3p modes work with --wfa-align).")
 
-    # --ltr-cluster and --cluster-only both shell out to mmseqs; fail fast if
-    # it isn't installed.
-    if (args.ltr_cluster or args.cluster_only) and shutil.which("mmseqs") is None:
+    # --ltr-cluster, --internal-cluster, and --cluster-only all shell out to
+    # mmseqs; fail fast if it isn't installed.
+    if (args.ltr_cluster or args.internal_cluster or args.cluster_only) and shutil.which("mmseqs") is None:
         parser.error("clustering requires mmseqs in PATH; "
                      "install (e.g. 'mamba install -c bioconda mmseqs2') and retry.")
+
+    # --min-seq-id: optional single-identity override for the clustering sweep.
+    if args.min_seq_id is not None:
+        if not (0.0 < args.min_seq_id <= 1.0):
+            parser.error("--min-seq-id must be in (0, 1].")
+        if not (args.ltr_cluster or args.internal_cluster or args.cluster_only):
+            parser.error("--min-seq-id has no effect without a clustering mode "
+                         "(--ltr-cluster, --internal-cluster, or --cluster-only).")
 
     # --cluster-only: skip the whole LTR pipeline and just run the mmseqs
     # --min-seq-id sweep on a pre-existing consensus FASTA, then exit.
@@ -2748,7 +2795,8 @@ if __name__ == "__main__":
         if not os.path.exists(args.cluster_only):
             parser.error(f"--cluster-only: consensus FASTA not found: {args.cluster_only}")
         cluster_tsvs = _run_mmseqs_cluster(
-            args.cluster_only, args.threads, args.verbose
+            args.cluster_only, args.threads, args.verbose,
+            min_seq_id=args.min_seq_id,
         )
         for cluster_tsv in cluster_tsvs:
             print(f"LTR cluster TSV in {cluster_tsv}")
