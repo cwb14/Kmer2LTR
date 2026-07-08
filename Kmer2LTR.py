@@ -2109,9 +2109,12 @@ def _run_mmseqs_cluster(consensus_fasta, threads: int, verbose: bool,
 
     The `coverage` arg maps to mmseqs -c. It defaults to 0.5, the value tuned
     for consensus LTRs by the grid search below. Internal-sequence clustering
-    passes coverage=0.8: internals have no dedicated tuning, so for now we
-    assume a slightly lower coverage floor than consensus LTRs and lock it at
-    0.8.
+    passes coverage=0.5: internal coverage was tuned based on B73. -c 0.4 
+    overclusts. 0.6 underclusters. In maize, clustering internals gives 23k
+    clusters with 16% singletons. Clustering consensus LTRs gives to 7k 
+    clusters and 4% singleton (both using -c 0.5 --min-seq-id 0.7). Consensus
+    LTR clusters are families. Consensus internal clusters are only useful for
+    crosschecking the consensus LTR clusters. 
 
     Fixed parameters (--cov-mode 0, --cluster-mode 1, --mask 0, -s 7.5) and the
     default coverage (-c 0.5) were chosen via a large grid search benchmarked
@@ -2298,12 +2301,12 @@ def process_one_input(args_base: argparse.Namespace, in_fasta: str, per_prefix_d
         print(f"Internal-sequence FASTA in {internal_outfile}")
         # Only --internal-cluster clusters; --internal-fasta stops at the FASTA.
         # Internals reuse the consensus-LTR clustering verbatim except coverage:
-        # -c 0.8 (vs 0.5), since internals have no dedicated tuning yet.
+        # -c 0.5.
         if getattr(args_base, "internal_cluster", False):
             internal_cluster_tsvs = _run_mmseqs_cluster(
                 internal_outfile, args_base.threads, args_base.verbose,
                 min_seq_id=getattr(args_base, "min_seq_id", None),
-                coverage=0.8,
+                coverage=0.5,
             )
             for cluster_tsv in internal_cluster_tsvs:
                 print(f"Internal cluster TSV in {cluster_tsv}")
