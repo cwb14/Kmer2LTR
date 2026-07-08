@@ -24,7 +24,8 @@ python Kmer2LTR/Kmer2LTR.py -i B73_all_ltr.fa -o B73_all_ltr --ltr-cluster --int
 # Flag false positives. 
 python flag_fp_families.py --consensus-cluster B73_all_ltr.consensus_id0.75_cluster.tsv --internal-cluster B73_all_ltr.internal_id0.75_cluster.tsv --ltr-fasta B73_all_ltr.consensus.fa --domains-tsv B73_LTR_depth*_ltr.tsv -o B73_fpcheck
 # I could filter those FPs from the results or, if there are a lot, I can use "B73_fpcheck.fp_LTRs.fa" to hardmask the genome, then re-run synLTR on the hardmasked genome. 
-# In maize, there are 424 FP identified this way from a pool of 132,931, so not a prolific issue and not worth tampering with. 
+# In maize, there are 424 FP identified this way from a pool of 132931 (0.3%), so not a prolific issue and not worth tampering with. 
+# In dog, this approach identifies 6284 FP from a pool of 8244 (76%), so here, FPs are a big issue (Makes sense due to dog LINE and SINE). We'd need to use "Basen_fpcheck.fp_LTRs.fa" to mask the dog genome, then reannotate LTR-RTs.
 """
 
 import argparse
