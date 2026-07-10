@@ -20,12 +20,40 @@ all its members are; their LTR sequences (the actual problem repeats) are writte
 # Merge the synLTR LTR-RT files. 
 awk '/^>/{printf "\n%s\n",$0;next}{gsub(/[^ACGTacgt]/,"");printf "%s",$0}END{print ""}' ./B73_LTR_depth*_ltr.fa > B73_all_ltr.fa
 # Process with Kmer2LTR.
-python Kmer2LTR/Kmer2LTR.py -i B73_all_ltr.fa -o B73_all_ltr --ltr-cluster --internal-fasta -p 200 --min-seq-id 0.75
+python Kmer2LTR/Kmer2LTR.py -i B73_all_ltr.fa -o B73_all_ltr --ltr-cluster --internal-cluster -p 200 --min-seq-id 0.75
 # Flag false positives. 
 python flag_fp_families.py --consensus-cluster B73_all_ltr.consensus_id0.75_cluster.tsv --internal-cluster B73_all_ltr.internal_id0.75_cluster.tsv --ltr-fasta B73_all_ltr.consensus.fa --domains-tsv B73_LTR_depth*_ltr.tsv -o B73_fpcheck
 # I could filter those FPs from the results or, if there are a lot, I can use "B73_fpcheck.fp_LTRs.fa" to hardmask the genome, then re-run synLTR on the hardmasked genome. 
 # In maize, there are 424 FP identified this way from a pool of 132931 (0.3%), so not a prolific issue and not worth tampering with. 
 # In dog, this approach identifies 6284 FP from a pool of 8244 (76%), so here, FPs are a big issue (Makes sense due to dog LINE and SINE). We'd need to use "Basen_fpcheck.fp_LTRs.fa" to mask the dog genome, then reannotate LTR-RTs.
+
+# In dog, I should mask the genome of problematic sequences and re-run.
+# First, purge redundants. 
+mmseqs easy-cluster B73_fpcheck.fp_LTRs.fa B73_fpcheck_mmseqs temp --min-seq-id 0.90 -c 0.95 --cov-mode 0 --cluster-mode 1 --mask 0 -s 7.5 --threads 100
+# Next, align problematic seqs to the genome and hardmask them
+python3 mask_fp.py -g B73.fa -q B73_fpcheck_mmseqs_rep_seq.fasta -o B73_FP_masked.fa
+
+# Then, I can re-run LTR-RT detection on the version of the genome with problematic sequences hardmasked (B73_FP_masked.fa) to improve recovery. 
+# Ive benchmarked this using PrinTE:
+# LTR-RT detection in the raw genome, pre-masking problematic sequences:
+Overlapping entries: 524 (524 unique)        [TP: 524 predicted-side / 524 truth-side]
+Entries unique to SCN/PASS file: 2475        [FP]
+Entries unique to BED file: 291        [FN]
+
+Precision = 0.1747   (TP_pred 524 / predictions 2999)
+Recall    = 0.6429   (TP_truth 524 / truths 815)   [= sensitivity]
+F1        = 0.2748
+FDR       = 0.8253   (1 - precision)
+
+# LTR-RT detection in the masked genome, post-masking problematic sequences:
+Overlapping entries: 717 (717 unique)        [TP: 717 predicted-side / 717 truth-side]
+Entries unique to SCN/PASS file: 31        [FP]
+Entries unique to BED file: 98        [FN]
+
+Precision = 0.9586   (TP_pred 717 / predictions 748)
+Recall    = 0.8798   (TP_truth 717 / truths 815)   [= sensitivity]
+F1        = 0.9175
+FDR       = 0.0414   (1 - precision)
 """
 
 import argparse
