@@ -1,55 +1,36 @@
 #!/usr/bin/env python3
-"""Flag false-positive LTR-RT families (chimeric non-LTR repeats) from Kmer2LTR
-cluster tables with a two-gate filter, and render a structure PDF.
+"""Flag false-positive LTR-RT families, clean depth TSVs, and conditionally mask.
 
-Each analyzed family (>= --min-members) runs a two-gate pipeline:
+Stage A (always): two-gate FP-family filter from Kmer2LTR cluster tables, writing
+  <prefix>.family_scores.tsv, <prefix>.fp_families.tsv, <prefix>.fp_LTRs.fa and a
+  <prefix>.fp_structure.pdf (identical to flag_fp_families.py).
+Stage B (always): for each --domains-tsv, write an FP-cleaned copy
+  (<name>_ltr.tsv -> <name>_clean_ltr.tsv): FP rows removed and dangling nest
+  cross-references scrubbed in both directions.
+Stage C (only if FP fraction > --fp-mask-threshold): mmseqs easy-cluster the FP
+  LTRs, then dc-megablast them against --genome and hard-mask hits to N.
 
-  Gate 1 - dominance: if one real clade dominates the family
-    (dominance >= --max-dominance) the labels are coherent, so the family PASSES
-    and is kept as a true positive ('safe').
+FP fraction = elements in false_positive families / total consensus-cluster members.
+In maize 424/132931 (0.3%) -> Stage C skipped; in dog 6284/8244 (76%) -> masking then
+re-annotation lifts precision from ~0.17 to ~0.96.
 
-  Gate 2 - reconstitution: a family that FAILS gate 1 gets a second chance. If its
-    internal regions reconstitute the family (reconstitution > --max-recon) it is
-    'recovered' (true positive). If the internals also fail to subcluster
-    (reconstitution <= --max-recon) the family is a 'false_positive'.
+awk '/^>/{printf "\n%s\n",$0;next}{gsub(/[^ACGTacgt]/,"");printf "%s",$0}END{print ""}' ./dog_depth*_ltr.fa > dog_all_ltr.fa
+python Kmer2LTR/Kmer2LTR.py -i dog_all_ltr.fa -o dog_all_ltr --ltr-cluster --internal-cluster -p 200 --min-seq-id 0.75
+python Kmer2LTR/flag_and_mask_fp.py --consensus-cluster dog_all_ltr.consensus_id0.75_cluster.tsv --internal-cluster dog_all_ltr.internal_id0.75_cluster.tsv --ltr-fasta dog_all_ltr.consensus.fa --domains-tsv dog_depth*[0-9]_ltr.tsv -o dog_fpcheck --genome dog.fa --threads 100
 
-A true LTR-RT family clears at least one gate: coherent labels, or reconstituting
-internals. A chimeric false positive fails both. If a family is a false positive
-all its members are; their LTR sequences (the actual problem repeats) are written out.
-
-# Merge the synLTR LTR-RT files. 
-awk '/^>/{printf "\n%s\n",$0;next}{gsub(/[^ACGTacgt]/,"");printf "%s",$0}END{print ""}' ./B73_LTR_depth*_ltr.fa > B73_all_ltr.fa
-# Process with Kmer2LTR.
-python Kmer2LTR/Kmer2LTR.py -i B73_all_ltr.fa -o B73_all_ltr --ltr-cluster --internal-cluster -p 200 --min-seq-id 0.75
-# Flag false positives. 
-python flag_fp_families.py --consensus-cluster B73_all_ltr.consensus_id0.75_cluster.tsv --internal-cluster B73_all_ltr.internal_id0.75_cluster.tsv --ltr-fasta B73_all_ltr.consensus.fa --domains-tsv B73_LTR_depth*_ltr.tsv -o B73_fpcheck
-# I could filter those FPs from the results or, if there are a lot, I can use "B73_fpcheck.fp_LTRs.fa" to hardmask the genome, then re-run synLTR on the hardmasked genome. 
-# In maize, there are 424 FP identified this way from a pool of 132931 (0.3%), so not a prolific issue and not worth tampering with. 
-# In dog, this approach identifies 6284 FP from a pool of 8244 (76%), so here, FPs are a big issue (Makes sense due to dog LINE and SINE). We'd need to use "Basen_fpcheck.fp_LTRs.fa" to mask the dog genome, then reannotate LTR-RTs.
-
-# In dog, I should mask the genome of problematic sequences and re-run.
-# First, purge redundants. 
-mmseqs easy-cluster B73_fpcheck.fp_LTRs.fa B73_fpcheck_mmseqs temp --min-seq-id 0.90 -c 0.95 --cov-mode 0 --cluster-mode 1 --mask 0 -s 7.5 --threads 100
-# Next, align problematic seqs to the genome and hardmask them
-python3 mask_fp.py -g B73.fa -q B73_fpcheck_mmseqs_rep_seq.fasta -o B73_FP_masked.fa
-
-# Then, I can re-run LTR-RT detection on the version of the genome with problematic sequences hardmasked (B73_FP_masked.fa) to improve recovery. 
-# Ive benchmarked this using PrinTE:
-# LTR-RT detection in the raw genome, pre-masking problematic sequences:
-Overlapping entries: 524 (524 unique)        [TP: 524 predicted-side / 524 truth-side]
-Entries unique to SCN/PASS file: 2475        [FP]
-Entries unique to BED file: 291        [FN]
-
+# Original (ie, no flag_and_mask_fp.py; dog_depth0_ltr.tsv):
 Precision = 0.1747   (TP_pred 524 / predictions 2999)
 Recall    = 0.6429   (TP_truth 524 / truths 815)   [= sensitivity]
 F1        = 0.2748
 FDR       = 0.8253   (1 - precision)
 
-# LTR-RT detection in the masked genome, post-masking problematic sequences:
-Overlapping entries: 717 (717 unique)        [TP: 717 predicted-side / 717 truth-side]
-Entries unique to SCN/PASS file: 31        [FP]
-Entries unique to BED file: 98        [FN]
+# Cleaned (flag_and_mask_fp.py used to purge those suspicious ones; dog_depth0_clean_ltr.tsv):
+Precision = 0.9424   (TP_pred 524 / predictions 556)
+Recall    = 0.6429   (TP_truth 524 / truths 815)   [= sensitivity]
+F1        = 0.7644
+FDR       = 0.0576   (1 - precision)
 
+# Using the flag_and_mask_fp.py hardmasked genome to re-run LTR-RT detection; dog_hardmaskedFP_depth0_ltr.tsv)
 Precision = 0.9586   (TP_pred 717 / predictions 748)
 Recall    = 0.8798   (TP_truth 717 / truths 815)   [= sensitivity]
 F1        = 0.9175
@@ -58,9 +39,13 @@ FDR       = 0.0414   (1 - precision)
 
 import argparse
 import math
+import multiprocessing as mp
 import os
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 
@@ -750,44 +735,294 @@ def render_pdf(path, metrics, families, internal_map, specs, thresholds,
 
 
 # -----------------------------------------------------------------------------
+# Genome masking (folded in from mask_fp.py)
+# -----------------------------------------------------------------------------
+BLAST_TASK = "dc-megablast"                       # sensitive to ~85% id copies
+OUTFMT = "6 sseqid pident sstart send qcovhsp"    # only the columns the mask needs
+WRAP = 60                                         # output FASTA line width
+
+
+def die(msg):
+    sys.exit(f"error: {msg}")
+
+
+def run(cmd, **kw):
+    """Print a command, then run it; abort on non-zero exit."""
+    print("  " + " ".join(cmd), file=sys.stderr)
+    if subprocess.run(cmd, **kw).returncode != 0:
+        die(f"command failed: {' '.join(cmd)}")
+
+
+def iter_fasta(path):
+    """Yield (header, sequence) one record at a time."""
+    name, chunks = None, []
+    with open(path) as fh:
+        for line in fh:
+            if line.startswith(">"):
+                if name is not None:
+                    yield name, "".join(chunks)
+                name, chunks = line[1:].rstrip("\n"), []
+            else:
+                chunks.append(line.strip())
+    if name is not None:
+        yield name, "".join(chunks)
+
+
+def merge(intervals):
+    """Merge overlapping/adjacent 0-based half-open intervals."""
+    intervals.sort()
+    out = []
+    for s, e in intervals:
+        if out and s <= out[-1][1]:
+            out[-1] = (out[-1][0], max(out[-1][1], e))
+        else:
+            out.append((s, e))
+    return out
+
+
+def coord_of(element_id):
+    """'chrom:start-end#Class/Super/Clade' -> 'chrom:start-end' (nest tokens omit label)."""
+    return element_id.split("#", 1)[0]
+
+
+def clean_output_path(in_path):
+    """Depth-TSV clean-copy path: '<name>_ltr.tsv' -> '<name>_clean_ltr.tsv', else
+    insert '.clean' before the extension. Kept in the input's directory."""
+    d, base = os.path.split(in_path)
+    if base.endswith("_ltr.tsv"):
+        base = base[:-len("_ltr.tsv")] + "_clean_ltr.tsv"
+    else:
+        root, ext = os.path.splitext(base)
+        base = root + ".clean" + ext
+    return os.path.join(d, base)
+
+
+_NEST_PREFIXES = ("nest-inner:", "nest-outer:")
+
+
+def scrub_nest_field(nest, fp_coords):
+    """Drop any nest-inner:/nest-outer: token pointing at a deleted FP coord (both
+    directions). Returns (new_field, n_dropped); '.' when nothing remains."""
+    if not nest or nest == ".":
+        return nest, 0
+    kept, dropped = [], 0
+    for tok in nest.split(";"):
+        coord = None
+        for p in _NEST_PREFIXES:
+            if tok.startswith(p):
+                coord = tok[len(p):]
+                break
+        if coord is not None and coord in fp_coords:
+            dropped += 1
+        else:
+            kept.append(tok)
+    return (";".join(kept) if kept else "."), dropped
+
+
+def clean_depth_tsv(in_path, out_path, fp_coords):
+    """Write an FP-cleaned copy of a depth TSV: drop rows whose element coord is an
+    FP, and scrub dangling nest tokens (both directions) from surviving rows. Header,
+    comment, and short/malformed lines pass through verbatim. Unchanged data lines are
+    written byte-for-byte. Returns (rows_removed, tokens_scrubbed)."""
+    removed = scrubbed = 0
+    with open(in_path) as fh, open(out_path, "w") as out:
+        for line in fh:
+            if line.startswith("#"):
+                out.write(line)
+                continue
+            raw = line.rstrip("\n")
+            f = raw.split("\t")
+            if len(f) < 2:
+                out.write(line)
+                continue
+            if coord_of(f[0]) in fp_coords:
+                removed += 1
+                continue
+            new_nest, n = scrub_nest_field(f[-1], fp_coords)
+            if n:
+                scrubbed += n
+                f[-1] = new_nest
+                out.write("\t".join(f) + "\n")
+            else:
+                out.write(line)
+    return removed, scrubbed
+
+
+def fp_fraction(n_fp, n_total):
+    """FP elements / total consensus-cluster members; 0.0 if no members."""
+    return (n_fp / n_total) if n_total else 0.0
+
+
+# --- BLAST worker state (set once per process via the Pool initializer) ---
+_DB = _PIDENT = _QCOV = None
+
+
+def _init(db, pident, qcov):
+    global _DB, _PIDENT, _QCOV
+    _DB, _PIDENT, _QCOV = db, pident, qcov
+
+
+def parse_blast_hits(stdout, pident, qcov):
+    """Parse outfmt6 'sseqid pident sstart send qcovhsp' -> passing 0-based half-open
+    (sseqid, start, end) intervals (BLAST 1-based inclusive -> 0-based half-open)."""
+    hits = []
+    for line in stdout.splitlines():
+        if not line.strip():
+            continue
+        sseqid, pid, ss, se, qc = line.split("\t")
+        if float(pid) >= pident and float(qc) >= qcov:
+            s, e = int(ss), int(se)
+            if s > e:
+                s, e = e, s
+            hits.append((sseqid, s - 1, e))
+    return hits
+
+
+def _blast_one(record):
+    """BLAST one query record against the worker DB; return passing intervals."""
+    header, seq = record
+    cmd = ["blastn", "-query", "-", "-db", _DB,
+           "-task", BLAST_TASK, "-dust", "no", "-evalue", "1e-5",
+           "-max_target_seqs", "100000", "-num_threads", "1", "-outfmt", OUTFMT]
+    r = subprocess.run(cmd, input=f">{header}\n{seq}\n", text=True, capture_output=True)
+    if r.returncode != 0:
+        raise RuntimeError(f"blastn failed on {header.split()[0]}: {r.stderr.strip()}")
+    return parse_blast_hits(r.stdout, _PIDENT, _QCOV)
+
+
+def mask_intervals_in_seq(seq, intervals):
+    """Set each 0-based half-open interval in seq to N. Returns (masked_seq, n_bp)."""
+    ba = bytearray(seq, "ascii")
+    n = len(ba)
+    masked = 0
+    for s, e in intervals:
+        s, e = max(0, s), min(n, e)
+        if e > s:
+            ba[s:e] = b"N" * (e - s)
+            masked += e - s
+    return ba.decode("ascii"), masked
+
+
+def write_masked_genome(genome_path, merged, out_path):
+    """Stream genome FASTA; mask each sseqid's merged intervals to N (one record in
+    memory at a time). Returns total bp masked."""
+    masked = 0
+    with open(out_path, "w") as out:
+        for header, seq in iter_fasta(genome_path):
+            sid = header.split()[0]
+            if sid in merged:
+                seq, n = mask_intervals_in_seq(seq, merged[sid])
+                masked += n
+            out.write(f">{header}\n")
+            for i in range(0, len(seq), WRAP):
+                out.write(seq[i:i + WRAP] + "\n")
+    return masked
+
+
+# mmseqs easy-cluster settings (baked in; only --threads is exposed).
+MMSEQS_MIN_SEQ_ID = 0.9
+MMSEQS_COV = 0.95
+MMSEQS_COV_MODE = 0
+MMSEQS_CLUSTER_MODE = 1
+MMSEQS_MASK = 0
+MMSEQS_SENS = 7.5
+
+
+def run_mmseqs(fp_fasta, out_prefix, threads):
+    """mmseqs easy-cluster to purge redundancy among the FP LTRs. Returns the
+    representative-sequence FASTA path (<out_prefix>_rep_seq.fasta)."""
+    if shutil.which("mmseqs") is None:
+        die("mmseqs not found on PATH")
+    tmp = tempfile.mkdtemp(prefix="mmseqs.")
+    try:
+        run(["mmseqs", "easy-cluster", fp_fasta, out_prefix, tmp,
+             "--min-seq-id", str(MMSEQS_MIN_SEQ_ID),
+             "-c", str(MMSEQS_COV),
+             "--cov-mode", str(MMSEQS_COV_MODE),
+             "--cluster-mode", str(MMSEQS_CLUSTER_MODE),
+             "--mask", str(MMSEQS_MASK),
+             "-s", str(MMSEQS_SENS),
+             "--threads", str(threads)])
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    rep = out_prefix + "_rep_seq.fasta"
+    if not os.path.isfile(rep):
+        die(f"mmseqs did not produce {rep}")
+    return rep
+
+
+def mask_genome(genome, query, out, pident=80.0, qcov=90.0, threads=None):
+    """dc-megablast the query FASTA against the genome and hard-mask hits to N.
+    One chromosome in memory at a time. Returns total bp masked."""
+    for tool in ("makeblastdb", "blastn"):
+        if shutil.which(tool) is None:
+            die(f"{tool} not found on PATH")
+    threads = threads or os.cpu_count()
+    tmp = tempfile.mkdtemp(prefix="mask_fp.")
+    try:
+        db = os.path.join(tmp, "db")
+        run(["makeblastdb", "-in", genome, "-dbtype", "nucl", "-out", db],
+            stdout=subprocess.DEVNULL)
+        queries = list(iter_fasta(query))
+        intervals = defaultdict(list)
+        with mp.Pool(threads, initializer=_init, initargs=(db, pident, qcov)) as pool:
+            for hits in pool.imap_unordered(_blast_one, queries, chunksize=1):
+                for sseqid, s, e in hits:
+                    intervals[sseqid].append((s, e))
+        merged = {sid: merge(v) for sid, v in intervals.items()}
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return write_masked_genome(genome, merged, out)
+
+
+# -----------------------------------------------------------------------------
 # CLI + orchestration
 # -----------------------------------------------------------------------------
 def parse_args(argv=None):
     ap = argparse.ArgumentParser(
-        description="Flag false-positive LTR-RT families (chimeric non-LTR repeats) from "
-                    "Kmer2LTR cluster tables with a two-gate filter: gate 1 = dominance "
-                    "(coherent labels pass and are kept); gate 2 = reconstitution (rescues "
-                    "gate-1 failures whose internals subcluster; the rest are false positives).")
+        description="Flag false-positive LTR-RT families, write FP-cleaned depth TSVs, "
+                    "and (only if FPs exceed --fp-mask-threshold) mmseqs-dedup the FP "
+                    "LTRs and hard-mask them out of --genome.")
     ap.add_argument("--consensus-cluster", required=True,
                     help="mmseqs consensus-LTR cluster TSV (rep<TAB>member); defines families")
     ap.add_argument("--internal-cluster", required=True,
                     help="mmseqs internal-region cluster TSV (rep<TAB>member); same element IDs")
     ap.add_argument("--ltr-fasta", required=True,
-                    help="consensus LTR FASTA (*.consensus.fa); source of output sequences")
+                    help="consensus LTR FASTA (*.consensus.fa); source of FP output sequences")
     ap.add_argument("-o", "--out-prefix", required=True, help="output path prefix")
     ap.add_argument("--domains-tsv", nargs="+", default=None,
-                    help="synLTR depth TSV(s), e.g. B73_LTR_depth*_ltr.tsv; enables the "
-                         "protein-domain overlay and supplies plot geometry (no --results / "
-                         "--element-fasta needed in this mode)")
-    ap.add_argument("--results", help="Kmer2LTR results table (LTR length + K2P; plot geometry when --domains-tsv absent)")
-    ap.add_argument("--element-fasta", help="full-element FASTA (element lengths via .fai; plot geometry when --domains-tsv absent)")
+                    help="synLTR depth TSV(s); enables the domain overlay AND is the source "
+                         "for the FP-cleaned *_clean_ltr.tsv outputs")
+    ap.add_argument("--results", help="Kmer2LTR results table (plot geometry when --domains-tsv absent)")
+    ap.add_argument("--element-fasta", help="full-element FASTA (plot geometry when --domains-tsv absent)")
     ap.add_argument("--min-members", type=int, default=DEFAULT_MIN_MEMBERS,
                     help="size gate: only families with >= this many members are analyzed (default 10)")
     ap.add_argument("--max-dominance", type=float, default=DEFAULT_MAX_DOMINANCE,
-                    help="gate 1 (dominance): a family whose top real clade covers >= this "
-                         "fraction of members passes and is kept (default 0.51)")
+                    help="gate 1 (dominance): top real clade covers >= this fraction -> kept (default 0.51)")
     ap.add_argument("--max-recon", type=float, default=DEFAULT_MAX_RECON,
-                    help="gate 2 (recon rescue): a gate-1 failure survives if reconstitution "
-                         "> this, otherwise it is a false positive (default 0.51)")
+                    help="gate 2 (recon rescue): survives if reconstitution > this, else FP (default 0.51)")
     ap.add_argument("--ignore-clades", default="unknown,mixture",
                     help="comma-separated clade/superfamily tokens treated as uninformative")
     ap.add_argument("--no-plot", action="store_true", help="skip the structure PDF")
     ap.add_argument("--borderline-pages", type=int, default=10,
-                    help="pages for non-flagged families closest to the FP boundary "
-                         "(default 10; 0 disables)")
+                    help="pages for non-flagged families closest to the FP boundary (default 10; 0 disables)")
     ap.add_argument("--tp-pages", type=int, default=3,
                     help="clean true-positive reference pages (default 3; 0 disables)")
     ap.add_argument("--pdf-out", default=None, help="PDF path (default <prefix>.fp_structure.pdf)")
+    # --- masking stage ---
+    ap.add_argument("-g", "--genome", default=None,
+                    help="genome FASTA to hard-mask (only used if FP fraction > --fp-mask-threshold)")
+    ap.add_argument("--masked-out", default=None,
+                    help="masked-genome output (default <genome_stem>_FP_masked.fa)")
+    ap.add_argument("--fp-mask-threshold", type=float, default=0.10,
+                    help="mask iff (FP elements / total members) > this fraction (default 0.10; "
+                         "0 = always mask, >=1 = never)")
+    ap.add_argument("--pident", type=float, default=80.0,
+                    help="masking: min %% identity to mask an HSP (default 80)")
+    ap.add_argument("--qcov", type=float, default=90.0,
+                    help="masking: min %% of query covered, qcovhsp (default 90)")
+    ap.add_argument("--threads", type=int, default=os.cpu_count(),
+                    help="threads for mmseqs and BLAST (default all cores)")
     ap.add_argument("-v", "--verbose", action="store_true", help="per-family metric lines")
     return ap.parse_args(argv)
 
@@ -796,6 +1031,7 @@ def main(argv=None):
     args = parse_args(argv)
     ignore = frozenset(s for s in args.ignore_clades.split(",") if s)
 
+    # ---- Stage A: flag FP families (unchanged behavior) ----
     member2rep = parse_clusters(args.consensus_cluster)
     internal_raw = parse_clusters(args.internal_cluster)
 
@@ -819,25 +1055,25 @@ def main(argv=None):
 
     metrics = []
     for rep, members in families.items():
-        fm = compute_family_metrics(rep, members, internal_map, ignore)
-        fm.verdict = classify_family(fm, args.max_recon, args.max_dominance)
-        metrics.append(fm)
+        fmet = compute_family_metrics(rep, members, internal_map, ignore)
+        fmet.verdict = classify_family(fmet, args.max_recon, args.max_dominance)
+        metrics.append(fmet)
         if args.verbose:
-            tag = {"false_positive": "FP ", "recovered": "rec", "safe": "   "}[fm.verdict]
-            print(f"[{tag}] {rep.split('#', 1)[0]}  n={fm.n} recon={fm.reconstitution:.2f} "
-                  f"dom={fm.dominance:.2f} ent={fm.entropy:.2f}  -> {fm.verdict}", file=sys.stderr)
+            tag = {"false_positive": "FP ", "recovered": "rec", "safe": "   "}[fmet.verdict]
+            print(f"[{tag}] {rep.split('#', 1)[0]}  n={fmet.n} recon={fmet.reconstitution:.2f} "
+                  f"dom={fmet.dominance:.2f} ent={fmet.entropy:.2f}  -> {fmet.verdict}", file=sys.stderr)
 
-    fp = [fm for fm in metrics if fm.verdict == "false_positive"]
-    n_safe = sum(1 for fm in metrics if fm.verdict == "safe")
-    n_rec = sum(1 for fm in metrics if fm.verdict == "recovered")
+    fp = [fmet for fmet in metrics if fmet.verdict == "false_positive"]
+    n_safe = sum(1 for fmet in metrics if fmet.verdict == "safe")
+    n_rec = sum(1 for fmet in metrics if fmet.verdict == "recovered")
     print(f"[INFO] gate 1 passed (safe): {n_safe}   gate 2 rescued (recovered): {n_rec}   "
-          f"false-positive: {len(fp)} families / {sum(fm.n for fm in fp)} elements",
+          f"false-positive: {len(fp)} families / {sum(fmet.n for fmet in fp)} elements",
           file=sys.stderr)
 
     write_family_scores(args.out_prefix + ".family_scores.tsv", metrics)
     write_fp_families(args.out_prefix + ".fp_families.tsv", metrics)
 
-    fp_members = [m for fm in fp for m in families[fm.rep]]
+    fp_members = [m for fmet in fp for m in families[fmet.rep]]
     n_written, n_missing = write_fp_fasta(args.out_prefix + ".fp_LTRs.fa", fp_members, args.ltr_fasta)
     print(f"[INFO] wrote {n_written} LTR sequences to {args.out_prefix}.fp_LTRs.fa "
           f"({n_missing} missing)", file=sys.stderr)
@@ -865,6 +1101,50 @@ def main(argv=None):
                            args.tp_pages, args.borderline_pages)
         print(f"[INFO] wrote {pdf_out} ({pages} pages)", file=sys.stderr)
 
+    # ---- Stage B: FP-cleaned depth TSVs (always, when --domains-tsv given) ----
+    fp_coords = {coord_of(m) for m in fp_members}
+    if args.domains_tsv:
+        for in_path in args.domains_tsv:
+            out_path = clean_output_path(in_path)
+            removed, scrubbed = clean_depth_tsv(in_path, out_path, fp_coords)
+            print(f"[INFO] {out_path}: removed {removed} FP rows, scrubbed {scrubbed} "
+                  f"dangling nest tokens", file=sys.stderr)
+
+    # ---- Stage C: conditional mmseqs + masking ----
+    frac = fp_fraction(len(fp_members), len(member2rep))
+    print(f"[INFO] FP fraction: {len(fp_members)}/{len(member2rep)} = {frac:.4f} "
+          f"(threshold {args.fp_mask_threshold})", file=sys.stderr)
+    if frac <= args.fp_mask_threshold:
+        print("[INFO] FP fraction <= threshold; FPs are not pervasive. "
+              "Skipping mmseqs + masking.", file=sys.stderr)
+        return 0
+
+    fp_fa = args.out_prefix + ".fp_LTRs.fa"
+    if not args.genome:
+        print(
+            f"\n[ACTION REQUIRED] FP fraction {frac:.1%} exceeds --fp-mask-threshold "
+            f"{args.fp_mask_threshold:.1%}, so masking is recommended, but no --genome was\n"
+            f"given. Stages A+B are complete. To finish masking, rerun with --genome <genome.fa>,\n"
+            f"or run manually:\n"
+            f"  mmseqs easy-cluster {fp_fa} {args.out_prefix}_mmseqs <tmp> --min-seq-id 0.90 "
+            f"-c 0.95 --cov-mode 0 --cluster-mode 1 --mask 0 -s 7.5 --threads {args.threads}\n"
+            f"  mask via {args.out_prefix}_mmseqs_rep_seq.fasta\n",
+            file=sys.stderr)
+        return 2
+
+    if not os.path.isfile(args.genome):
+        die(f"no such genome file: {args.genome}")
+    for tool in ("mmseqs", "makeblastdb", "blastn"):
+        if shutil.which(tool) is None:
+            die(f"{tool} not found on PATH")
+
+    print(f"[INFO] FP fraction > threshold; FPs are pervasive -> mmseqs dedup + masking.",
+          file=sys.stderr)
+    rep = run_mmseqs(fp_fa, args.out_prefix + "_mmseqs", args.threads)
+    masked_out = args.masked_out or (
+        os.path.splitext(os.path.basename(args.genome))[0] + "_FP_masked.fa")
+    bp = mask_genome(args.genome, rep, masked_out, args.pident, args.qcov, args.threads)
+    print(f"[INFO] masked {bp:,} bp -> N; wrote {masked_out}", file=sys.stderr)
     return 0
 
 
