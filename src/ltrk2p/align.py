@@ -68,8 +68,10 @@ def discover(S: str, matrix, gap_open: int = GAP_OPEN, gap_extend: int = GAP_EXT
         return Hit(score=fwd.score, qb=qb, qe=qe, rb=rb, re=re_, w=w)
 
 
-from .k2p import count_substitutions
-from .scoring import estimate_params, logodds_bits, parasail_matrix
+from .k2p import count_substitutions, k2p_distance, p_distance
+from .scoring import estimate_params, logodds_bits, parasail_matrix, wfa_penalties
+from .cigar import aligned_pair_from_cigartuples, cs_string, extended_cigar
+from pywfa import WavefrontAligner
 
 MIN_CALIB_SITES = 50
 
@@ -200,3 +202,122 @@ def outermost(S: str, bounds: Bounds, matrix, max_evalue: float = MAX_EVALUE) ->
     off3 = bounds.l3e + 1
     return Bounds(l5b=qb, l5e=qe, l3b=off3 + rb, l3e=off3 + re_,
                   margin_bits=bounds.margin_bits)
+
+
+@dataclass(frozen=True)
+class Result:
+    seq_id: str
+    seq_len: int
+    status: str
+    ltr5_start: int | None      # 1-based inclusive
+    ltr5_end: int | None
+    ltr3_start: int | None
+    ltr3_end: int | None
+    ltr5_len: int | None
+    ltr3_len: int | None
+    flank5_len: int | None
+    flank3_len: int | None
+    aln_len: int | None
+    n_sites: int | None
+    n_ts: int | None
+    n_tv: int | None
+    n_gapcols: int | None
+    identity: float | None
+    p_dist: float | None
+    k2p: float | None
+    k2p_se: float | None
+    bitscore: float | None
+    flank_margin_bits: float | None
+    cigar: str | None
+
+
+def _empty(seq_id: str, seq_len: int, status: str) -> Result:
+    return Result(seq_id, seq_len, status, *([None] * 20))
+
+
+def _refine(q: str, r: str) -> tuple[str, str]:
+    """Stage 5: exact global alignment via WFA. Penalties are converted from
+    the parasail scheme so WFA optimises the same objective."""
+    x, o, e = wfa_penalties(match=SCALE, mismatch=SCALE, open_p=GAP_OPEN, ext_p=GAP_EXTEND)
+    al = WavefrontAligner(q, mismatch=x, gap_opening=o, gap_extension=e,
+                          scope="full", span="end-to-end")
+    al(r)
+    return aligned_pair_from_cigartuples(al.cigartuples, q, r)
+
+
+def _refine_matrix(q: str, r: str, matrix) -> tuple[str, str]:
+    """Ablation alternative to _refine: exact global alignment under the
+    ti/tv-aware calibrated matrix instead of WFA's uniform mismatch penalty."""
+    res = parasail.nw_trace_striped_sat(q, r, GAP_OPEN, GAP_EXTEND, matrix)
+    return res.traceback.query, res.traceback.ref
+
+
+def classify(seq_id: str, S: str, *, cs: bool = False, t_bits: float = T_BITS,
+             max_evalue: float = MAX_EVALUE, w0: int = W0,
+             min_bitscore: float | None = None, matrix=None,
+             use_stage3: bool = True, use_stage4: bool = True,
+             trim: int = 0, refine: str = "wfa") -> Result:
+    """Locate the LTR pair and measure its divergence.
+
+    Keyword knobs after min_bitscore drive Task 14's ablations; their defaults
+    reproduce production behaviour.
+    """
+    L = len(S)
+    if L < MIN_LEN:
+        return _empty(seq_id, L, "too_short")
+    if all(ch == "N" for ch in S):
+        return _empty(seq_id, L, "all_ambiguous")
+
+    hit = discover(S, GENERIC_MATRIX, w0=w0)
+    if hit is None:
+        return _empty(seq_id, L, "no_pair")
+    if matrix is None:
+        matrix, _, _ = calibrate(S, hit)
+        hit = discover(S, matrix, w0=w0) or hit
+    if use_stage3:
+        bounds = terminal_snap(S, hit, matrix, t_bits)
+    else:
+        l5b, l5e, l3b, l3e = ltr_spans(S, hit)
+        bounds = Bounds(l5b, l5e, l3b, l3e, None)
+    if use_stage4:
+        bounds = outermost(S, bounds, matrix, max_evalue)
+
+    q = S[bounds.l5b:bounds.l5e + 1]
+    r = S[bounds.l3b:bounds.l3e + 1]
+    if not q or not r:
+        return _empty(seq_id, L, "no_pair")
+    a, b = _refine(q, r) if refine == "wfa" else _refine_matrix(q, r, matrix)
+    if trim:
+        if len(a) <= 2 * trim:
+            return _empty(seq_id, L, "no_pair")
+        a, b = a[trim:-trim], b[trim:-trim]
+    counts = count_substitutions(a, b)
+
+    # Significance is ALWAYS scored with GENERIC_MATRIX, never the calibrated one.
+    # MAX_EVALUE is calibrated against GENERIC's score scale; the calibrated matrix
+    # is on a different scale (at low divergence a match scores +8 vs GENERIC's +4),
+    # so the same numeric threshold is not transferable. Mixing them leaked spurious
+    # hits in Stage 4 (14/2500 -> 0/2500 once gated on GENERIC). The calibrated
+    # matrix determines the ALIGNMENT; GENERIC determines SIGNIFICANCE.
+    score = parasail.nw_striped_sat(q, r, GAP_OPEN, GAP_EXTEND, GENERIC_MATRIX).score
+    bitscore = bits(score)
+    if (evalue(bitscore, hit.w, hit.w) > max_evalue or counts.n_sites == 0
+            or (min_bitscore is not None and bitscore < min_bitscore)):
+        return _empty(seq_id, L, "no_pair")
+
+    d, se = k2p_distance(counts)
+    status = "pass" if d is not None else "k2p_undefined"
+    pd = p_distance(counts)
+    aln_str = cs_string(a, b) if cs else extended_cigar(a, b)
+    return Result(
+        seq_id=seq_id, seq_len=L, status=status,
+        ltr5_start=bounds.l5b + 1, ltr5_end=bounds.l5e + 1,
+        ltr3_start=bounds.l3b + 1, ltr3_end=bounds.l3e + 1,
+        ltr5_len=bounds.l5e - bounds.l5b + 1, ltr3_len=bounds.l3e - bounds.l3b + 1,
+        flank5_len=bounds.l5b, flank3_len=L - 1 - bounds.l3e,
+        aln_len=counts.aln_len, n_sites=counts.n_sites, n_ts=counts.n_ts,
+        n_tv=counts.n_tv, n_gapcols=counts.n_gapcols,
+        identity=counts.n_match / counts.n_sites,
+        p_dist=pd, k2p=d, k2p_se=se, bitscore=bitscore,
+        flank_margin_bits=bounds.margin_bits, cigar=aln_str,
+    )
