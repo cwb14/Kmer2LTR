@@ -160,3 +160,36 @@ def terminal_snap(S: str, hit: Hit, matrix, t_bits: float = T_BITS) -> Bounds:
     l3e = min(L - 1, l3e)
     l5e = min(l5e, l3b - 1)
     return Bounds(l5b, l5e, l3b, l3e, min(margins) if margins else None)
+
+
+# NOTE: MAX_EVALUE and `evalue` are already defined/imported in align.py by Task 5.
+# Do NOT redefine them here.
+MIN_OUTER = 50      # shorter outer segments cannot carry a significant pair
+
+
+def outermost(S: str, bounds: Bounds, matrix, max_evalue: float = MAX_EVALUE) -> Bounds:
+    """If a flank was called, prefer a significant repeat pair strictly outside it.
+
+    This is what makes a retained (un-excised) nested element report the OUTER
+    element rather than the younger, higher-scoring nested one.
+    """
+    L = len(S)
+    if bounds.l5b == 0 and bounds.l3e == L - 1:
+        return bounds
+    outer5 = S[:bounds.l5b]
+    outer3 = S[bounds.l3e + 1:]
+    if len(outer5) < MIN_OUTER or len(outer3) < MIN_OUTER:
+        return bounds
+    res = parasail.sw_striped_sat(outer5, outer3, GAP_OPEN, GAP_EXTEND, matrix)
+    if res.score <= 0:
+        return bounds
+    if evalue(bits(res.score), len(outer5), len(outer3)) > max_evalue:
+        return bounds
+    qe, re_ = res.end_query, res.end_ref
+    rev = parasail.sw_striped_sat(outer5[:qe + 1][::-1], outer3[:re_ + 1][::-1],
+                                  GAP_OPEN, GAP_EXTEND, matrix)
+    qb = qe - rev.end_query
+    rb = re_ - rev.end_ref
+    off3 = bounds.l3e + 1
+    return Bounds(l5b=qb, l5e=qe, l3b=off3 + rb, l3e=off3 + re_,
+                  margin_bits=bounds.margin_bits)
