@@ -1,0 +1,59 @@
+import math
+import pytest
+from ltrk2p.k2p import SubstCounts, count_substitutions, k2p_distance, p_distance
+
+def test_counts_basic():
+    #        match  ts(A>G)  tv(A>C)  gap      N
+    a = "AAAA" "A" "A" "A" "A"
+    b = "AAAA" "G" "C" "-" "N"
+    c = count_substitutions(a, b)
+    assert (c.n_match, c.n_ts, c.n_tv, c.n_gapcols) == (4, 1, 1, 1)
+    assert c.n_sites == 6
+    assert c.aln_len == 8
+
+def test_counts_all_four_transitions():
+    a, b = "ACGT", "GTAC"       # A>G ts, C>T ts, G>A ts, T>C ts
+    c = count_substitutions(a, b)
+    assert (c.n_ts, c.n_tv) == (4, 0)
+
+def test_counts_transversions():
+    a, b = "AACC", "CCAA"       # A<->C are all transversions
+    c = count_substitutions(a, b)
+    assert (c.n_ts, c.n_tv) == (0, 4)
+
+def test_identical_sequences_zero_distance():
+    c = count_substitutions("ACGTACGT", "ACGTACGT")
+    d, se = k2p_distance(c)
+    assert d == 0.0 and se == 0.0
+    assert p_distance(c) == 0.0
+
+def test_k2p_matches_hand_computed_value():
+    # P=0.10, Q=0.05, n=100 -> d = -0.5*ln(1-0.25) - 0.25*ln(1-0.10)
+    c = SubstCounts(n_sites=100, n_match=85, n_ts=10, n_tv=5, n_gapcols=0, aln_len=100)
+    expected = -0.5 * math.log(1 - 2*0.10 - 0.05) - 0.25 * math.log(1 - 2*0.05)
+    d, se = k2p_distance(c)
+    assert d == pytest.approx(expected, rel=1e-12)
+    assert se > 0
+
+def test_k2p_undefined_when_saturated():
+    # 1 - 2P - Q <= 0
+    c = SubstCounts(n_sites=100, n_match=0, n_ts=50, n_tv=50, n_gapcols=0, aln_len=100)
+    assert k2p_distance(c) == (None, None)
+
+def test_k2p_undefined_with_no_sites():
+    c = SubstCounts(n_sites=0, n_match=0, n_ts=0, n_tv=0, n_gapcols=10, aln_len=10)
+    assert k2p_distance(c) == (None, None)
+    assert p_distance(c) is None
+
+def test_k2p_monotonic_in_divergence():
+    ds = []
+    for mism in (5, 10, 20, 30):
+        c = SubstCounts(n_sites=100, n_match=100-mism, n_ts=mism*2//3,
+                        n_tv=mism - mism*2//3, n_gapcols=0, aln_len=100)
+        ds.append(k2p_distance(c)[0])
+    assert ds == sorted(ds)
+
+def test_k2p_exceeds_p_distance():
+    # multiple-hit correction must inflate the raw proportion
+    c = SubstCounts(n_sites=100, n_match=75, n_ts=17, n_tv=8, n_gapcols=0, aln_len=100)
+    assert k2p_distance(c)[0] > p_distance(c)
