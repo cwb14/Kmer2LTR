@@ -66,3 +66,38 @@ def discover(S: str, matrix, gap_open: int = GAP_OPEN, gap_extend: int = GAP_EXT
             # pair, since Hit carries no significance field.
             return None
         return Hit(score=fwd.score, qb=qb, qe=qe, rb=rb, re=re_, w=w)
+
+
+from .k2p import count_substitutions
+from .scoring import estimate_params, logodds_bits, parasail_matrix
+
+MIN_CALIB_SITES = 50
+
+
+def ltr_spans(S: str, hit: Hit) -> tuple[int, int, int, int]:
+    """Absolute 0-based (l5b, l5e, l3b, l3e); ends inclusive."""
+    wstart = len(S) - hit.w
+    return hit.qb, hit.qe - 1, wstart + hit.rb, wstart + hit.re - 1
+
+
+def _parasail_aligned_pair(res, query: str, ref: str) -> tuple[str, str]:
+    """Expand a parasail traceback into gapped aligned strings."""
+    tb = res.traceback
+    return tb.query, tb.ref
+
+
+def core_alignment(S: str, hit: Hit) -> tuple[str, str]:
+    l5b, l5e, l3b, l3e = ltr_spans(S, hit)
+    q, r = S[l5b:l5e + 1], S[l3b:l3e + 1]
+    res = parasail.nw_trace_striped_sat(q, r, GAP_OPEN, GAP_EXTEND, GENERIC_MATRIX)
+    return _parasail_aligned_pair(res, q, r)
+
+
+def calibrate(S: str, hit: Hit):
+    """Derive this element's own scoring matrix from its own divergence."""
+    a, b = core_alignment(S, hit)
+    counts = count_substitutions(a, b)
+    d_hat, kappa_hat, freqs = estimate_params(counts, S)
+    if counts.n_sites < MIN_CALIB_SITES:
+        return GENERIC_MATRIX, d_hat, kappa_hat
+    return parasail_matrix(logodds_bits(d_hat, kappa_hat, freqs)), d_hat, kappa_hat
