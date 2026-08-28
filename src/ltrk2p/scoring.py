@@ -14,7 +14,12 @@ _BASES = "ACGT"
 _PURINES = frozenset("AG")
 _PYRIMIDINES = frozenset("CT")
 
-KAPPA_MIN, KAPPA_MAX, KAPPA_DEFAULT = 0.5, 10.0, 2.0
+# kappa floor of 1.0, not below: kappa < 1 inverts the ti/tv weighting (transversions
+# would score above transitions), which for LTR pairs only ever arises from small-sample
+# noise on a short core. kappa = 1 degenerates gracefully to equal weighting. This clamp
+# affects ONLY the scoring matrix -- the reported K2P distance is computed from observed
+# ts/tv counts and never uses kappa, so no reported distance is biased by it.
+KAPPA_MIN, KAPPA_MAX, KAPPA_DEFAULT = 1.0, 10.0, 2.0
 D_MIN, D_MAX = 0.01, 1.0   # calibration is clamped: the matrix must stay usable
 
 
@@ -35,7 +40,17 @@ def k2p_probs(d: float, kappa: float) -> tuple[float, float, float]:
 
 
 def logodds_bits(d: float, kappa: float, freqs: dict[str, float]) -> dict[tuple[str, str], float]:
-    """s(x,y) = log2( P_xy(d, kappa) / f_y ), in bits."""
+    """s(x,y) = log2( P_xy(d, kappa) / (4 * f_x * f_y) ), in bits.
+
+    Log-odds of homology against independence: the numerator is the joint
+    probability of the pair under the K2P model (whose ancestral distribution
+    is uniform, hence the factor 4), the denominator the joint probability
+    under independence at the element's own composition.
+
+    Dividing by f_y alone -- the conditional form -- is asymmetric whenever the
+    composition is non-uniform, which makes the alignment score depend on which
+    sequence is the query. Both f_x and f_y are needed.
+    """
     p_same, p_ti, p_tv = k2p_probs(d, kappa)
     out: dict[tuple[str, str], float] = {}
     for x in _BASES:
@@ -46,8 +61,9 @@ def logodds_bits(d: float, kappa: float, freqs: dict[str, float]) -> dict[tuple[
                 p = p_ti
             else:
                 p = p_tv
+            fx = max(freqs.get(x, 0.25), 1e-6)
             fy = max(freqs.get(y, 0.25), 1e-6)
-            out[(x, y)] = math.log2(p / fy)
+            out[(x, y)] = math.log2(p / (4.0 * fx * fy))
     return out
 
 

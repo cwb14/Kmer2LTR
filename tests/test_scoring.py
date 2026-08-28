@@ -77,6 +77,34 @@ def test_evalue_decreases_with_bitscore_and_grows_with_window():
     assert evalue(50, 1000, 1000) < evalue(20, 1000, 1000)
     assert evalue(50, 8000, 8000) > evalue(50, 1000, 1000)
 
+def test_logodds_matrix_is_symmetric_under_skewed_composition():
+    """An asymmetric matrix makes the alignment score depend on which sequence
+    is the query -- observed as 735 vs 755 on the same pair before this fix."""
+    at_rich = {"A": 0.35, "T": 0.35, "C": 0.15, "G": 0.15}
+    b = logodds_bits(0.3, 2.0, at_rich)
+    for x in "ACGT":
+        for y in "ACGT":
+            assert b[(x, y)] == pytest.approx(b[(y, x)], abs=1e-12), f"{x}{y} asymmetric"
+
+
+def test_alignment_score_is_independent_of_argument_order():
+    import random
+    random.seed(1)
+    at_rich = {"A": 0.35, "T": 0.35, "C": 0.15, "G": 0.15}
+    m = parasail_matrix(logodds_bits(0.3, 2.0, at_rich))
+    a = "".join(random.choice("AT" if random.random() < 0.7 else "CG") for _ in range(200))
+    b = "".join(c if random.random() < 0.8 else random.choice("ACGT") for c in a)
+    assert (parasail.nw_striped_sat(a, b, 24, 8, m).score
+            == parasail.nw_striped_sat(b, a, 24, 8, m).score)
+
+
+def test_estimate_params_clamps_kappa_at_one_not_below():
+    """kappa < 1 would invert ti/tv scoring; the floor prevents it."""
+    c = SubstCounts(n_sites=1000, n_match=900, n_ts=10, n_tv=90, n_gapcols=0, aln_len=1000)
+    _, kappa, _ = estimate_params(c, "ACGT" * 250)
+    assert kappa == 1.0
+
+
 @pytest.mark.parametrize("m_,xp,op,ep", [(0, 4, 8, 2), (4, 4, 24, 8), (2, 3, 10, 2)])
 def test_wfa_penalties_match_parasail_optimum(m_, xp, op, ep):
     """The conversion must make WFA optimise the SAME objective as parasail.
