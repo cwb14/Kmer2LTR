@@ -5,13 +5,14 @@ from dataclasses import dataclass
 
 import parasail
 
-from .scoring import SCALE, GENERIC_MATRIX
+from .scoring import SCALE, GENERIC_MATRIX, bits, evalue
 
 GAP_OPEN = 6 * SCALE      # 6 bits; parasail convention: gap of k costs open + (k-1)*ext
 GAP_EXTEND = 2 * SCALE    # 2 bits
 MIN_LEN = 100             # shorter than this cannot hold two LTRs plus internal
 W0 = 1500
 EDGE = 20                 # touching within this many bp of the inner edge -> grow
+MAX_EVALUE = 1e-3         # significance floor; Task 8 reuses this same constant
 
 
 @dataclass(frozen=True)
@@ -41,6 +42,9 @@ def discover(S: str, matrix, gap_open: int = GAP_OPEN, gap_extend: int = GAP_EXT
         P, Q = S[:w], S[L - w:]
         fwd = parasail.sw_striped_sat(P, Q, gap_open, gap_extend, matrix)
         if fwd.score <= 0:
+            if w < w_max:
+                w = min(w * 2, w_max)
+                continue
             return None
         qe, re_ = fwd.end_query, fwd.end_ref
         rev = parasail.sw_striped_sat(P[:qe + 1][::-1], Q[:re_ + 1][::-1],
@@ -48,7 +52,12 @@ def discover(S: str, matrix, gap_open: int = GAP_OPEN, gap_extend: int = GAP_EXT
         qb = qe - rev.end_query
         rb = re_ - rev.end_ref
         touches_inner = (qe >= w - edge) or (rb <= edge)
-        if touches_inner and w < w_max:
+        # A window too small to span the LTR (ltr_len >= 2w) leaves the two windows
+        # covering DISJOINT parts of the LTR, so the only hit available is background
+        # noise -- which has no reason to touch an edge. Insignificance must therefore
+        # trigger growth too, or large-LTR elements are silently mis-called.
+        weak = evalue(bits(fwd.score), w, w) > MAX_EVALUE
+        if (touches_inner or weak) and w < w_max:
             w = min(w * 2, w_max)
             continue
         return Hit(score=fwd.score, qb=qb, qe=qe, rb=rb, re=re_, w=w)
