@@ -60,4 +60,9 @@ def discover(S: str, matrix, gap_open: int = GAP_OPEN, gap_extend: int = GAP_EXT
         if (touches_inner or weak) and w < w_max:
             w = min(w * 2, w_max)
             continue
+        if weak:
+            # At the ceiling with an insignificant hit: there is no terminal repeat here.
+            # Returning it anyway would hand callers noise indistinguishable from a real
+            # pair, since Hit carries no significance field.
+            return None
         return Hit(score=fwd.score, qb=qb, qe=qe, rb=rb, re=re_, w=w)

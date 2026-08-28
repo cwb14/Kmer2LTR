@@ -74,3 +74,13 @@ def test_window_grows_for_ltr_at_and_above_twice_initial_window():
 def test_degenerate_inputs_do_not_raise():
     for S in ("", "ACGT", "N" * 500, "A" * 500, _rnd(150, 1)):
         discover(S, GENERIC_MATRIX)      # must not raise
+
+def test_non_ltr_sequence_returns_none_not_a_noise_hit():
+    """Random sequence has no terminal repeat. Returning a Hit anyway would hand
+    callers noise they cannot distinguish from a real pair -- Hit has no
+    significance field. Measured E-values on such hits were 58-467 against a
+    1e-3 threshold."""
+    for length in (3000, 9000):
+        for seed in range(5):
+            assert discover(_rnd(length, seed), GENERIC_MATRIX) is None, \
+                f"spurious hit on random {length}bp seed={seed}"
