@@ -1,0 +1,59 @@
+import random
+import pytest
+from ltrk2p.align import discover, Hit, GAP_OPEN, GAP_EXTEND
+from ltrk2p.scoring import GENERIC_MATRIX
+
+def _rnd(n, seed=None):
+    r = random.Random(seed)
+    return "".join(r.choice("ACGT") for _ in range(n))
+
+def test_finds_exact_ltr_pair_with_no_flank():
+    ltr = _rnd(300, 1); internal = _rnd(1200, 2)
+    S = ltr + internal + ltr
+    h = discover(S, GENERIC_MATRIX)
+    assert h.qb == 0 and h.qe == 299
+    # 3' LTR occupies the last 300 bases
+    assert len(S) - h.w + h.rb == len(S) - 300
+    assert len(S) - h.w + h.re == len(S) - 1
+
+def test_finds_pair_when_flanked_on_both_sides():
+    ltr = _rnd(300, 3); internal = _rnd(1200, 4)
+    f5, f3 = _rnd(80, 5), _rnd(120, 6)
+    S = f5 + ltr + internal + ltr + f3
+    h = discover(S, GENERIC_MATRIX)
+    assert h.qb == 80 and h.qe == 379
+    assert len(S) - h.w + h.re == len(S) - 121
+
+def test_window_grows_when_ltr_exceeds_initial_window():
+    """LTR of 2500 bp exceeds w0=1500, so the window must double to find it."""
+    ltr = _rnd(2500, 7); internal = _rnd(3000, 8)
+    S = ltr + internal + ltr
+    h = discover(S, GENERIC_MATRIX)
+    assert h.w > 1500
+    assert h.qb == 0 and h.qe == 2499
+
+def test_window_never_exceeds_half_length():
+    ltr = _rnd(400, 9)
+    S = ltr + ltr                     # no internal region at all
+    h = discover(S, GENERIC_MATRIX)
+    assert h.w == len(S) // 2
+    assert h.qb == 0 and h.qe == 399
+
+def test_ltr5_end_always_before_ltr3_start():
+    for seed in range(10):
+        ltr = _rnd(200, seed); internal = _rnd(400, seed + 100)
+        S = ltr + internal + ltr
+        h = discover(S, GENERIC_MATRIX)
+        ltr3_start_abs = len(S) - h.w + h.rb
+        assert h.qe < ltr3_start_abs
+
+def test_returns_none_for_sequence_too_short():
+    assert discover("ACGT", GENERIC_MATRIX) is None
+
+def test_random_sequence_yields_low_score():
+    """No terminal repeat -> whatever is found must score far below a real pair."""
+    S = _rnd(3000, 42)
+    h = discover(S, GENERIC_MATRIX)
+    ltr = _rnd(300, 1)
+    real = discover(ltr + _rnd(1200, 2) + ltr, GENERIC_MATRIX)
+    assert h is None or h.score < real.score / 4

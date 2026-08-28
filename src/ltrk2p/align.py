@@ -1,0 +1,54 @@
+"""Stages 1-5: locate the terminal repeat pair and align it."""
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import parasail
+
+from .scoring import SCALE, GENERIC_MATRIX
+
+GAP_OPEN = 6 * SCALE      # 6 bits; parasail convention: gap of k costs open + (k-1)*ext
+GAP_EXTEND = 2 * SCALE    # 2 bits
+MIN_LEN = 100             # shorter than this cannot hold two LTRs plus internal
+W0 = 1500
+EDGE = 20                 # touching within this many bp of the inner edge -> grow
+
+
+@dataclass(frozen=True)
+class Hit:
+    score: int
+    qb: int   # 0-based inclusive, index into prefix window (starts at 0)
+    qe: int
+    rb: int   # 0-based inclusive, index into suffix window (starts at len(S)-w)
+    re: int
+    w: int
+
+
+def discover(S: str, matrix, gap_open: int = GAP_OPEN, gap_extend: int = GAP_EXTEND,
+             w0: int = W0, edge: int = EDGE) -> Hit | None:
+    """Locate the terminal repeat pair by adaptive-window local alignment.
+
+    Score-only passes throughout: traceback costs ~7x more and is not needed
+    until boundaries are settled. Two passes -- forward for the inner ends,
+    then reversed-prefix for the outer ends.
+    """
+    L = len(S)
+    if L < MIN_LEN:
+        return None
+    w_max = L // 2
+    w = min(w_max, w0)
+    while True:
+        P, Q = S[:w], S[L - w:]
+        fwd = parasail.sw_striped_sat(P, Q, gap_open, gap_extend, matrix)
+        if fwd.score <= 0:
+            return None
+        qe, re_ = fwd.end_query, fwd.end_ref
+        rev = parasail.sw_striped_sat(P[:qe + 1][::-1], Q[:re_ + 1][::-1],
+                                      gap_open, gap_extend, matrix)
+        qb = qe - rev.end_query
+        rb = re_ - rev.end_ref
+        touches_inner = (qe >= w - edge) or (rb <= edge)
+        if touches_inner and w < w_max:
+            w = min(w * 2, w_max)
+            continue
+        return Hit(score=fwd.score, qb=qb, qe=qe, rb=rb, re=re_, w=w)
