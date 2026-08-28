@@ -174,6 +174,17 @@ E = K * m * n * 2^(-S')
 with `m`, `n` the two window lengths and `K` a constant for the matrix. A pair is reported
 as `status = pass` only if `E` is below threshold; otherwise `status = no_pair`.
 
+**Significance is always scored with the generic matrix, never the calibrated one.** The two
+are on different score scales — at low divergence the calibrated matrix scores a match at
+`+8` in SCALE units where the generic matrix scores `+4` — so a fixed E-value threshold
+calibrated against one is invalid against the other. Applying the generic-calibrated
+threshold to calibrated scores made a 13 bp chance match report roughly double the bits and
+an E-value about 2^13 too small, which leaked spurious "outer pairs" out of unrelated
+flanking DNA in Stage 4 (measured 14 of 2500 elements, every instance at low divergence;
+zero after gating on the generic matrix). The division of labour is therefore explicit: the
+**calibrated matrix determines the alignment and the boundaries; the generic matrix
+determines significance.**
+
 Because gapped alignment perturbs the analytic `K` and `lambda`, the threshold is **not
 trusted analytically**. It is calibrated empirically against the negative controls of
 section 6.6 (non-LTR TEs and shuffled sequence) to hit a target false-positive rate, and
