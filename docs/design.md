@@ -121,8 +121,8 @@ Three consequences, each load-bearing:
    diverged LTRs actually differ, and it is the same substitution model the tool reports.
 2. Scores are in **bits**, so "no LTR pair here" becomes a bit-score/E-value decision
    rather than an arbitrary identity floor.
-3. Composition adjustment via `f_y` down-weights matches in AT-rich context, which is the
-   principal defence against over-extension into AT-rich flanking DNA.
+3. Composition adjustment via `f_x · f_y` down-weights matches in AT-rich context, which is
+   the principal defence against over-extension into AT-rich flanking DNA.
 
 Re-run Stage 1 once with the calibrated matrix. This self-tuning is what delivers "zero
 customization": the scoring adapts per element instead of the user tuning it.
