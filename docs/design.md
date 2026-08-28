@@ -437,8 +437,13 @@ errors); `-v` adds per-step progress and sanity checks.
 Failure policy: fail fast with a clear message on bad input, missing dependencies, or a
 corrupt file; warn and skip for a single malformed record.
 
-**Parallelism:** `ProcessPoolExecutor` over records with chunking; output written in input
-order. Records are independent, so this scales linearly.
+**Parallelism:** `ProcessPoolExecutor` over records with **bounded submission** — at most
+`threads * 4` futures in flight, popped in submission order. `Executor.map` cannot be used:
+it drains its input generator completely before dispatching, which materialises the entire
+FASTA in the parent and breaks the streaming guarantee on exactly the multi-threaded path
+that exists for whole-genome input. Measured with the alignment stubbed out, driver peak RSS
+was flat at ~39 MB across 48/192/479 MB inputs single-threaded, but grew to 52/69/96 MB at
+8 threads under `map`. Output is byte-identical regardless of thread count.
 
 **Resume:** `--resume` counts data lines already present in the output and skips that many
 input records, then appends. This is correct even with duplicate IDs, which an ID-keyed
