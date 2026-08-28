@@ -197,9 +197,38 @@ better. Measured on synthetic perfectly-bounded elements (n=300 per point,
 | 0.25 | 48.7% | 1.69 | 20 | 43.3% | 1.33 | 20 |
 | 0.35 | 65.0% | 3.76 | 44 | 63.0% | 3.40 | 47 |
 
-At ~25% p-distance (K2P ~0.30, the stated target regime) a naive local aligner would
-**falsely report overextension on roughly half of perfectly bounded inputs.** That is
-disqualifying for the tool's headline feature.
+Those are **per-terminus** rates. The user-facing quantity is **per-element** — an element
+is wrong if *either* terminus is — and because the two termini fail near-independently that
+rate is approximately `1 - (1-a)(1-b)`, which is substantially higher. Measured directly
+(n=150 per level):
+
+| p-distance | 5' trimmed | 3' trimmed | **per-element wrong** | 1-(1-a)(1-b) |
+|---|---|---|---|---|
+| 0.05 | 7.3%  | 10.7% | **18.0%** | 17.2% |
+| 0.15 | 26.7% | 27.3% | **48.7%** | 46.7% |
+| 0.25 | 50.0% | 46.7% | **75.3%** | 73.3% |
+| 0.35 | 59.3% | 64.7% | **88.0%** | 85.6% |
+
+So at ~25% p-distance (K2P ~0.30, the stated target regime) a naive local aligner would
+**falsely report overextension on roughly three quarters of perfectly bounded inputs.** That
+is disqualifying for the tool's headline feature.
+
+**Measured outcome of Stage 3** (80 perfectly-bounded elements per level, per-element rate):
+
+| p-distance | raw SW | Stage 3 | improvement |
+|---|---|---|---|
+| 0.05 | 14/80 | 3/80 | 4.7x |
+| 0.15 | 37/80 | 2/80 | 18.5x |
+| 0.25 | 63/80 (79%) | 1/80 (1.2%) | **63x** |
+| 0.35 | 69/80 | 2/80 | 34.5x |
+| 0.45 | 75/80 | 3/80 | 25x |
+
+Detection of genuine flanks is retained: at p=0.25, 20 bp flanks are found 95% of the time
+and 50 bp or larger essentially always, with called length accurate to under a base (mean
+49.8 for a true 50, 199.9 for a true 200). The false-positive rate on zero-flank elements is
+2.5%. `T_BITS = 5.0` sits in a plateau, not on a cliff: sweeping it gives 57.5% false-flank
+at t=0, 3.8% at t=5, 0% at t=10 but with true-flank detection falling to 83.8%, and at
+t=25 the degenerate 0%/0% regime where no flank is ever called.
 
 The fix is to ask directly whether homology reaches each terminus, as an exact model
 comparison rather than a greedy endpoint:
