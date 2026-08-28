@@ -47,11 +47,26 @@ def test_negatives_recognise_repbase_tab_delimited_class(tmp_path):
     assert not any("GYPSY3" in i for i in ids)      # LTR class must not be a negative
 
 
-def test_ambiguous_classes_excluded_from_negatives_and_truth(tmp_path):
-    """DIRS/Penelope/Troyka may carry terminal repeats, so they belong in
-    neither set -- including them would contaminate the false-positive estimate."""
+def test_ambiguous_classes_excluded_from_negatives(tmp_path):
+    """DIRS/Ngaro/Viper/Penelope/Troyka may carry split or inverted terminal
+    repeats, so they belong in neither set -- a negative control containing
+    elements that genuinely have a terminal repeat would corrupt the
+    false-positive estimate."""
     p = tmp_path / "amb.fa"
-    p.write_text(">SOMEDIRS_XX\tDIRS\tSpecies\n" + "ACGT" * 200 + "\n")
+    p.write_text(">SOMEDIRS_XX\tDIRS\tSpecies\n" + "ACGT" * 200 + "\n"
+                 ">SOMEPEN_YY\tPenelope\tSpecies\n" + "ACGT" * 200 + "\n")
     out = tmp_path / "neg.fa"
     assert build_negatives([p], out) == 0
-    assert family_key("SOMEDIRS-LTR_XX") is None or True   # not asserted as LTR truth
+
+
+def test_ambiguous_class_ids_do_not_enter_truth():
+    """Real repbase DIRS entries carry -LTR/-I suffixes (DIRS-1_PGr-LTR /
+    DIRS-1_PGr-I) and were being paired as if canonical. family_key sees only
+    the id, never the tab-delimited class field, so it must reject them from
+    the id alone -- measured to catch 1243/1243 real cases."""
+    assert family_key("DIRS-1_PGr-LTR") is None
+    assert family_key("DIRS-1_PGr-I") is None
+    assert family_key("Ngaro-2_DR-LTR") is None
+    assert family_key("Penelope-1_XX-I") is None
+    # a genuine LTR element must still pair
+    assert family_key("GYPSY65-LTR_AG") == ("GYPSY65_AG", "LTR")

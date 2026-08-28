@@ -24,12 +24,21 @@ _NON_LTR = re.compile(r"#(DNA|LINE|SINE|RC|Helitron|Satellite|rRNA|tRNA|Simple)"
 # Penelope, and Troyka. Excluding them costs a little data and avoids
 # contaminating the false-positive estimate with elements that may legitimately
 # carry a terminal repeat.
+#
+# Fix round 2 adds a second block of LINE-lineage non-LTR-retrotransposon
+# names, measured directly against repbase's tab field 2 during a headroom
+# audit -- these unambiguously lack terminal direct repeats (LINEs use
+# target-site duplications, not LTRs), so they belong in the negative set.
+# Kept conservative: any class whose terminal structure was not certain
+# (Dada, Zisupton, Naiad/Chlamys, CRE, R4, Athena, ...) was left out and
+# reported rather than guessed at.
 _NEG_CLASSES = re.compile(
     r"^(hAT|Mariner|Tc1|MuDR|Harbinger|EnSpm|CACTA|PiggyBac|P$|Transib|Kolobok|"
     r"Merlin|Sola|Zator|Academ|Ginger|Novosib|Helitron|Crypton|"
     r"L1|L2|CR1|RTE|RTEX|Jockey|R1|R2|I$|LOA|Rex|Proto|Tad1|"
     r"SINE|Alu|B4|MIR|tRNA|5S|7SL|"
-    r"DNA transposon|Satellite|Simple|rRNA|snRNA)", re.I)
+    r"DNA transposon|Satellite|Simple|rRNA|snRNA|"
+    r"Non-LTR|Neptune|Tx1|Daphne|Nimb|Ingi|Vingi|Outcast|Crack|Kiri|NeSL|HERO|Rex1|Utopia)", re.I)
 
 _AMBIGUOUS_CLASSES = re.compile(r"^(DIRS|Ngaro|Viper|Penelope|Troyka)", re.I)
 
