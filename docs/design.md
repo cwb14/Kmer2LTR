@@ -230,7 +230,7 @@ where the speed matters.
 **CIGAR conversion.** pywfa emits `M` for true matches and `X` for mismatches. Because `X`
 is emitted separately, `M` here unambiguously means "equal" despite the SAM spec's
 contrary meaning. Conversion to extended CIGAR is `M -> =`. This is pinned down here
-because silently mis-reading it would corrupt column 22.
+because silently mis-reading it would corrupt column 23.
 
 **Open trade-off, resolved by ablation.** WFA2-lib supports only a uniform mismatch
 penalty, not the ti/tv-aware calibrated matrix from Stage 2. Boundaries come from
@@ -256,19 +256,59 @@ substitution counts (standard practice) and reported separately as `n_gapcols`.
 When `1 - 2P - Q <= 0` or `1 - 2Q <= 0` the estimate is undefined (saturated). It is
 reported as `NA` with `status = k2p_undefined`, **never as a silently clamped number.**
 
+#### Terminal sites are not trimmed by default
+
+A tempting safeguard is to exclude the outermost few bases of each LTR from the
+substitution counts, on the grounds that boundary placement is uncertain there. This is
+**not** done by default, because the bias it introduces does not point in one direction:
+
+- At the two **outer (snapped) ends**, the boundary is fixed by the sequence terminus, not
+  by the alignment score. There is no selection on those bases, so they are a fair sample.
+  Excluding them costs data and removes no bias.
+- At the two **inner ends**, the boundary *is* score-determined, and a local alignment
+  always terminates on a match. The retained inner-terminal bases are therefore
+  **match-enriched**. Trimming them would bias K2P *upward* — the opposite of the
+  contamination the trim was meant to remove.
+- Only when Stage 3 has **erred** and retained a few bases of true flank does trimming
+  help, and there it biases K2P downward.
+
+A blanket 5 bp margin would discard ~5% of sites (20 bp across four ends of a 400 bp LTR)
+from every element, to guard against an error that Stage 3 exists to prevent, at exactly
+the divergence where sites are scarcest. That trades a measured, correctable bias for an
+unmeasured one.
+
+Two things are done instead:
+
+1. **Ablation rather than assumption** (section 6.4): K2P is measured at
+   trim in {0, 3, 5, 10} bp per end for bias *and* RMSE across the divergence range and
+   all flank lengths. If a trim reduces RMSE without introducing bias, it becomes the
+   default. If it trades bias for variance, it does not. The evidence decides, and if the
+   benefit turns out to be confined to the flank-called subset, the trim is applied only
+   there.
+2. **Uncertain elements are flagged, not silently degraded.** Stage 3 already computes its
+   decision margin, so column `flank_margin_bits` reports how decisively each boundary
+   call was made. Filtering ambiguous *elements* downstream is statistically cleaner than
+   trimming sites from *every* element, and it keeps the tool's behaviour visible rather
+   than hidden inside the estimator.
+
 ## 4. Output columns
 
 ```
 1  seq_id        7  ltr3_end     13 n_sites     19 k2p
 2  seq_len       8  ltr5_len     14 n_ts        20 k2p_se
 3  status        9  ltr3_len     15 n_tv        21 bitscore
-4  ltr5_start   10  flank5_len   16 n_gapcols   22 cigar
-5  ltr5_end     11  flank3_len   17 identity
+4  ltr5_start   10  flank5_len   16 n_gapcols   22 flank_margin_bits
+5  ltr5_end     11  flank3_len   17 identity    23 cigar
 6  ltr3_start   12  aln_len      18 p_dist
 ```
 
-The six originally requested fields are `cut -f1,4-7,19,22`. `--cs` swaps column 22 to a
+The six originally requested fields are `cut -f1,4-7,19,23`. `--cs` swaps column 23 to a
 minimap2-style short `cs` string.
+
+`flank_margin_bits` reports the smaller of the two Stage 3 decision margins,
+`min(|s5 + T|, |s3 + T|)` in bits: how decisively the boundary call was made. Large values
+mean the call was unambiguous; values near zero mark elements whose boundaries sit at the
+detection floor and which a cautious downstream analysis may wish to exclude.
 
 `status` values: `pass`, `no_pair`, `too_short`, `all_ambiguous`, `k2p_undefined`.
 Non-`pass` rows carry `NA` in the coordinate and distance columns.
@@ -360,6 +400,7 @@ Every design element must earn its place:
 | Stage 4 on/off | delete Stage 4 if it never fires |
 | WFA uniform penalty vs. calibrated matrix in Stage 5 | decides the Stage 5 aligner |
 | Stage 1 iteration count | confirms one recalibration pass suffices |
+| terminal trim of 0/3/5/10 bp per LTR end | decides whether trimming is adopted; measured for bias *and* RMSE, overall and within the flank-called subset |
 
 ### 6.5 Real data, three independent checks
 
