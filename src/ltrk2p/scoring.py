@@ -124,8 +124,18 @@ def bits(raw_score: int) -> float:
 
 def evalue(bitscore: float, m: int, n: int, k_const: float = 0.1) -> float:
     """Karlin-Altschul form. Supplies the correct dependence on window size;
-    the constant is calibrated empirically against negative controls."""
-    return k_const * m * n * (2.0 ** -bitscore)
+    the constant is calibrated empirically against negative controls.
+
+    An overflowing exponent means the alignment is astronomically
+    insignificant, so infinity is the semantically correct answer: every
+    caller compares against MAX_EVALUE and rejects, which is the same
+    decision the finite arithmetic would have reached. Without this guard a
+    single pathological record aborts an entire batch run.
+    """
+    try:
+        return k_const * m * n * (2.0 ** -bitscore)
+    except OverflowError:
+        return math.inf
 
 
 def wfa_penalties(match: int, mismatch: int, open_p: int, ext_p: int) -> tuple[int, int, int]:

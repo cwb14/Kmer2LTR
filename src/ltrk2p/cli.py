@@ -40,6 +40,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ltrk2p: error: input file not found: {inp}", file=sys.stderr)
         return 2
 
+    if args.threads < 1:
+        print(f"ltrk2p: error: --threads must be >= 1, got {args.threads}", file=sys.stderr)
+        return 2
+
     # Thread tuning values explicitly. Assigning align.T_BITS / align.W0 would
     # be a silent no-op: both are already bound as default arguments at def time.
     classify_kw = {"t_bits": args.flank_bits}

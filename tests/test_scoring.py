@@ -132,3 +132,13 @@ def test_wfa_penalties_match_parasail_optimum(m_, xp, op, ep):
                               scope="score", span="end-to-end")
         al(b)
         assert -al.score == m_ * (len(a) + len(b)) - 2 * par
+
+def test_evalue_does_not_overflow_on_hugely_negative_bitscore():
+    """A pathological alignment can score below -1024 bits, where 2**-bitscore
+    overflows a float. That aborted an entire batch run. Infinity is the
+    correct answer -- it exceeds any threshold, so the pair is rejected."""
+    assert evalue(-1000, 1500, 1500) > 0            # still finite here
+    assert evalue(-1030, 1500, 1500) == math.inf
+    assert evalue(-5000, 1500, 1500) == math.inf
+    # normal range must be untouched
+    assert evalue(50, 1500, 1500) == pytest.approx(1.998e-10, rel=1e-3)

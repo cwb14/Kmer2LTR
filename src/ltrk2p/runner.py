@@ -60,6 +60,8 @@ def run(input_path, out_handle, threads: int = 1, cs: bool = False,
             n += 1
             if verbose and n % 1000 == 0:
                 print(f"  {n} records", file=sys.stderr)
+            elif not verbose and n % 25000 == 0:
+                print(f"  {n} records", file=sys.stderr)
     else:
         max_inflight = max(1, threads) * 4
         with ProcessPoolExecutor(max_workers=threads) as pool:
@@ -69,6 +71,8 @@ def run(input_path, out_handle, threads: int = 1, cs: bool = False,
                 out_handle.write(format_row(pending.popleft().result()) + "\n")
                 n += 1
                 if verbose and n % 1000 == 0:
+                    print(f"  {n} records", file=sys.stderr)
+                elif not verbose and n % 25000 == 0:
                     print(f"  {n} records", file=sys.stderr)
                 nxt = next(it, None)
                 if nxt is not None:

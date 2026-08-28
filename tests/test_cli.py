@@ -79,3 +79,17 @@ def test_console_entry_point_installed(tmp_path):
     r = subprocess.run([PY, "-m", "ltrk2p", str(inp)], capture_output=True, text=True)
     assert r.returncode == 0
     assert r.stdout.startswith("seq_id\t")
+
+def test_extreme_flank_bits_does_not_crash(tmp_path):
+    """--flank-bits >= ~2000 forced boundaries across kb of unrelated flank,
+    producing a bitscore below -1024 and an OverflowError that aborted the run
+    with a truncated output file. Needs a LONG record; a ~1kb fixture cannot
+    reproduce it."""
+    ltr = _rnd(400, 3)
+    seq = _rnd(3000, 4) + ltr + _rnd(4000, 5) + ltr + _rnd(3000, 6)
+    inp = tmp_path / "long.fa"
+    inp.write_text(f">long\n{seq}\n")
+    out = tmp_path / "o.tsv"
+    assert main([str(inp), "-o", str(out), "--flank-bits", "5000"]) == 0
+    rows = out.read_text().rstrip("\n").split("\n")
+    assert len(rows) == 2          # header + exactly one record, not truncated
