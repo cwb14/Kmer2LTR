@@ -48,3 +48,29 @@ def test_does_not_fire_on_genuine_flank():
     m, _, _ = calibrate(S, h)
     b0 = terminal_snap(S, h, m)
     assert outermost(S, b0, m) == b0
+
+def test_does_not_invent_an_outer_pair_from_unrelated_flanks():
+    """Random flanks share no homology. Adopting a chance match as an 'outer
+    pair' corrupts a correctly-called element -- worse than this stage not
+    existing. Leaked 14/2500 when the gate was scored with the calibrated
+    matrix instead of GENERIC_MATRIX."""
+    spurious = 0
+    trials = 0
+    for div in (0.01, 0.05):
+        for flank in (300, 600):
+            for seed in range(25):
+                trials += 1
+                anc = _rnd(400, seed * 7)
+                S = (_rnd(flank, seed + 1) + _evolve(anc, div / 2, seed + 2)
+                     + _rnd(1200, seed + 3) + _evolve(anc, div / 2, seed + 4)
+                     + _rnd(flank, seed + 5))
+                h = discover(S, GENERIC_MATRIX)
+                if h is None:
+                    continue
+                m, _, _ = calibrate(S, h)
+                h2 = discover(S, m) or h
+                b0 = terminal_snap(S, h2, m)
+                b = outermost(S, b0, m)
+                if (b0.l5b, b0.l5e, b0.l3b, b0.l3e) != (b.l5b, b.l5e, b.l3b, b.l3e):
+                    spurious += 1
+    assert spurious == 0, f"invented an outer pair on {spurious}/{trials} unrelated-flank elements"

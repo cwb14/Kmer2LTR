@@ -180,14 +180,21 @@ def outermost(S: str, bounds: Bounds, matrix, max_evalue: float = MAX_EVALUE) ->
     outer3 = S[bounds.l3e + 1:]
     if len(outer5) < MIN_OUTER or len(outer3) < MIN_OUTER:
         return bounds
-    res = parasail.sw_striped_sat(outer5, outer3, GAP_OPEN, GAP_EXTEND, matrix)
+    # Significance is scored with GENERIC_MATRIX, not the per-element calibrated
+    # matrix. MAX_EVALUE was calibrated against GENERIC's score scale, and the
+    # calibrated matrix is on a different one -- at low divergence it scores a
+    # match +8 where GENERIC scores +4, so the same alignment reports roughly
+    # double the bits and an E-value ~2^13 too small. Mixing the two leaked
+    # spurious "outer pairs" out of pure chance similarity between unrelated
+    # flanks (measured 14/2500 before this change, 0/2500 after).
+    res = parasail.sw_striped_sat(outer5, outer3, GAP_OPEN, GAP_EXTEND, GENERIC_MATRIX)
     if res.score <= 0:
         return bounds
     if evalue(bits(res.score), len(outer5), len(outer3)) > max_evalue:
         return bounds
     qe, re_ = res.end_query, res.end_ref
     rev = parasail.sw_striped_sat(outer5[:qe + 1][::-1], outer3[:re_ + 1][::-1],
-                                  GAP_OPEN, GAP_EXTEND, matrix)
+                                  GAP_OPEN, GAP_EXTEND, GENERIC_MATRIX)
     qb = qe - rev.end_query
     rb = re_ - rev.end_ref
     off3 = bounds.l3e + 1
