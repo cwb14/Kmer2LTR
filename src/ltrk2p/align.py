@@ -105,3 +105,58 @@ def calibrate(S: str, hit: Hit):
     if counts.n_sites < MIN_CALIB_SITES:
         return GENERIC_MATRIX, d_hat, kappa_hat
     return parasail_matrix(logodds_bits(d_hat, kappa_hat, freqs)), d_hat, kappa_hat
+
+
+T_BITS = 5.0     # evidence required to claim a flank exists; benchmark-calibrated
+
+
+@dataclass(frozen=True)
+class Bounds:
+    l5b: int
+    l5e: int
+    l3b: int
+    l3e: int
+    margin_bits: float | None
+
+
+def terminal_snap(S: str, hit: Hit, matrix, t_bits: float = T_BITS) -> Bounds:
+    """Decide, per terminus, whether homology reaches the end of the sequence.
+
+    Exact model comparison rather than a greedy endpoint: extending the core
+    to the terminus is accepted iff the extension costs less than t_bits.
+    Under the penalised objective score - T*(free ends), that is s_ext > -T.
+    """
+    L = len(S)
+    wstart = L - hit.w
+    l5b, l5e, l3b, l3e = ltr_spans(S, hit)
+    margins: list[float] = []
+
+    # 5' test: reverse the outer segments so "begins anchored" == "next to the core".
+    # sg_de -> query fully consumed (reach S[0]), ref end free.
+    if l5b > 0:
+        q = S[:l5b][::-1]
+        r = S[wstart:l3b][::-1]
+        if q and r:
+            res = parasail.sg_de_striped_sat(q, r, GAP_OPEN, GAP_EXTEND, matrix)
+            s5 = bits(res.score)
+            margins.append(abs(s5 + t_bits))
+            if s5 > -t_bits:
+                l5b = 0
+                l3b = l3b - (res.end_ref + 1)
+
+    # 3' test: sg_qe -> ref fully consumed (reach S[L-1]), query end free.
+    if l3e < L - 1:
+        q = S[l5e + 1:hit.w]
+        r = S[l3e + 1:]
+        if q and r:
+            res = parasail.sg_qe_striped_sat(q, r, GAP_OPEN, GAP_EXTEND, matrix)
+            s3 = bits(res.score)
+            margins.append(abs(s3 + t_bits))
+            if s3 > -t_bits:
+                l3e = L - 1
+                l5e = l5e + (res.end_query + 1)
+
+    l5b = max(0, l5b)
+    l3e = min(L - 1, l3e)
+    l5e = min(l5e, l3b - 1)
+    return Bounds(l5b, l5e, l3b, l3e, min(margins) if margins else None)
