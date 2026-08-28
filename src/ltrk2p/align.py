@@ -75,9 +75,13 @@ MIN_CALIB_SITES = 50
 
 
 def ltr_spans(S: str, hit: Hit) -> tuple[int, int, int, int]:
-    """Absolute 0-based (l5b, l5e, l3b, l3e); ends inclusive."""
+    """Absolute 0-based (l5b, l5e, l3b, l3e); ends inclusive.
+
+    parasail's end_query/end_ref are 0-based INCLUSIVE, so they are used as-is.
+    Do not subtract 1: that truncates the final base of both LTRs.
+    """
     wstart = len(S) - hit.w
-    return hit.qb, hit.qe - 1, wstart + hit.rb, wstart + hit.re - 1
+    return hit.qb, hit.qe, wstart + hit.rb, wstart + hit.re
 
 
 def _parasail_aligned_pair(res, query: str, ref: str) -> tuple[str, str]:

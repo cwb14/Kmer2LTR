@@ -69,3 +69,20 @@ def test_calibrated_matrix_scores_N_zero():
     arr = np.array(m.matrix)
     assert list(arr[4][:5]) == [0, 0, 0, 0, 0]
     assert [arr[i][4] for i in range(5)] == [0, 0, 0, 0, 0]
+
+def test_ltr_spans_recovers_exact_ltr_sequence_unflanked():
+    """Ground truth: the element is built from a known LTR, so the sliced spans
+    must reproduce it byte-for-byte. Unflanked, so there is no boundary fraying
+    and the correct answer is unambiguous. This is the test that catches an
+    off-by-one; the flanked fixture cannot, because drift into the flank can
+    coincidentally cancel it."""
+    for ltr_len in (200, 400, 1200):
+        for seed in range(6):
+            ltr = _rnd(ltr_len, seed)
+            S = ltr + _rnd(1500, seed + 50) + ltr
+            h = discover(S, GENERIC_MATRIX)
+            assert h is not None
+            l5b, l5e, l3b, l3e = ltr_spans(S, h)
+            assert S[l5b:l5e + 1] == ltr, f"5' LTR wrong at len={ltr_len} seed={seed}"
+            assert S[l3b:l3e + 1] == ltr, f"3' LTR wrong at len={ltr_len} seed={seed}"
+            assert l5e - l5b + 1 == ltr_len and l3e - l3b + 1 == ltr_len
