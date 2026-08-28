@@ -99,10 +99,21 @@ Globally align the core pair and estimate identity `p̂`, transition/transversio
 divergence and composition:
 
 ```
-s(x,y) = log2( P_xy(d̂, κ̂) / f_y )
+s(x,y) = log2( P_xy(d̂, κ̂) / (4 · f_x · f_y) )
 ```
 
 where `P` is the K2P transition-probability matrix and `f` the element's base composition.
+This is the log-odds of homology against independence: the numerator is the joint
+probability of the aligned pair under K2P (whose ancestral distribution is uniform, hence
+the factor 4), the denominator the joint probability under independence at the element's
+own composition.
+
+**Both `f_x` and `f_y` are required.** The conditional form `P_xy / f_y` is asymmetric
+whenever the composition is non-uniform — K2P's `P` assumes equal base frequencies, so
+dividing by an observed skewed composition mixes two models. The consequence is not
+cosmetic: it makes the alignment score depend on which sequence is the query (measured at
+735 vs 755 on one AT-rich pair), which would affect nearly every element in an AT- or
+GC-biased genome.
 
 Three consequences, each load-bearing:
 
