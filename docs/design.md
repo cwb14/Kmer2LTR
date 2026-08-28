@@ -92,8 +92,11 @@ while 3000/4000/6000 bp resolved 2/20, 2/20 and 0/20. Maize Gypsy LTRs (1.3-2.5 
 legume Ogre/Tat LTRs (4-5 kb) fall in the failing range, so this is not a corner case.
 
 Growing on insignificance restores 20/20 at every length tested and leaves the common case
-unchanged (0.33 ms for a typical 400 bp-LTR element). Non-LTR input now grows to the
-ceiling before reporting no pair, bounded at ~23 ms for a 35 kb record.
+unchanged (0.33 ms for a typical 400 bp-LTR element). Non-LTR input grows to the ceiling
+and is then rejected outright — an insignificant hit at `W = floor(L/2)` means there is no
+terminal repeat, so discovery returns nothing rather than a noise hit a caller could not
+distinguish from a real pair. Bounded at ~22 ms for a 35 kb record, and it saves the
+downstream calibration and refinement work that a spurious hit would have triggered.
 
 `floor(L/2)` is always sufficient: detection needs `W > LTR_len / 2`, and since an element
 contains two LTRs, `L >= 2 * LTR_len`, so `floor(L/2) >= LTR_len > LTR_len / 2`.
