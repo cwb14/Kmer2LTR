@@ -391,7 +391,23 @@ mean the call was unambiguous; values near zero mark elements whose boundaries s
 detection floor and which a cautious downstream analysis may wish to exclude.
 
 `status` values: `pass`, `no_pair`, `too_short`, `all_ambiguous`, `k2p_undefined`.
-Non-`pass` rows carry `NA` in the coordinate and distance columns.
+
+`no_pair`, `too_short` and `all_ambiguous` rows carry `NA` in every data column — no LTR
+pair was located, so there is nothing to report.
+
+**`k2p_undefined` is deliberately different**: it means the pair *was* located and its
+boundaries are valid, but the divergence is saturated so the K2P correction has no defined
+value. Only `k2p` and `k2p_se` are `NA`; the coordinates, lengths, flank calls, substitution
+counts, identity, p-distance, bit score and CIGAR are all reported, because they are
+correct and useful. Nulling them would discard good measurements to satisfy a blanket rule.
+
+In practice this status is close to unreachable through `classify`: the significance gate
+structurally requires roughly >50% identity to accept a pair, while K2P stays defined below
+p-distance 0.5, so the two conditions are nearly mutually exclusive. Systematic search over
+~2500 trials (pairwise distance to 3.0, `max_evalue` relaxed to 1e6) got no closer than
+p-distance 0.5017 with both K2P denominators still well clear of zero. The status is kept
+because saturation is a real possibility on adversarial input and reporting `NA` is the
+honest response, not because it is expected to fire.
 
 ## 5. Package
 
