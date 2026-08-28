@@ -33,6 +33,7 @@ def test_k2p_matches_hand_computed_value():
     expected = -0.5 * math.log(1 - 2*0.10 - 0.05) - 0.25 * math.log(1 - 2*0.05)
     d, se = k2p_distance(c)
     assert d == pytest.approx(expected, rel=1e-12)
+    # exact SE value is checked in test_k2p_standard_error_matches_delta_method_closed_form
     assert se > 0
 
 def test_k2p_undefined_when_saturated():
@@ -57,3 +58,47 @@ def test_k2p_exceeds_p_distance():
     # multiple-hit correction must inflate the raw proportion
     c = SubstCounts(n_sites=100, n_match=75, n_ts=17, n_tv=8, n_gapcols=0, aln_len=100)
     assert k2p_distance(c)[0] > p_distance(c)
+
+def test_k2p_standard_error_matches_delta_method_closed_form():
+    """Exact-value check on the SE, derived independently via the delta method.
+
+    d = -0.5*ln(w1) - 0.25*ln(w2), so dd/dP = 1/w1 = a and
+    dd/dQ = 0.5*(1/w1 + 1/w2) = b. Under multinomial sampling
+    Var(P)=P(1-P)/n, Var(Q)=Q(1-Q)/n, Cov(P,Q)=-PQ/n, giving
+    Var(d) = a^2*P + b^2*Q - (a*P + b*Q)^2, all over n.
+    """
+    n, ts, tv = 100, 10, 5
+    c = SubstCounts(n_sites=n, n_match=n - ts - tv, n_ts=ts, n_tv=tv,
+                    n_gapcols=0, aln_len=n)
+    P, Q = ts / n, tv / n
+    w1, w2 = 1 - 2 * P - Q, 1 - 2 * Q
+    a = 1 / w1
+    b = 0.5 * (1 / w1 + 1 / w2)
+    expected_se = math.sqrt((a * a * P + b * b * Q - (a * P + b * Q) ** 2) / n)
+    _, se = k2p_distance(c)
+    assert se == pytest.approx(expected_se, rel=1e-12)
+    assert se == pytest.approx(0.04633146812126295, rel=1e-12)   # pinned value
+
+def test_k2p_standard_error_matches_monte_carlo_sampling_sd():
+    """The reported SE must match the actual spread of d across replicates."""
+    import random
+    rng = random.Random(0)
+    P_true, Q_true, n, reps = 0.10, 0.05, 500, 3000
+    ds, ses = [], []
+    for _ in range(reps):
+        ts = tv = 0
+        for _ in range(n):
+            u = rng.random()
+            if u < P_true:
+                ts += 1
+            elif u < P_true + Q_true:
+                tv += 1
+        d, se = k2p_distance(SubstCounts(n_sites=n, n_match=n - ts - tv, n_ts=ts,
+                                         n_tv=tv, n_gapcols=0, aln_len=n))
+        if d is not None:
+            ds.append(d)
+            ses.append(se)
+    mean = sum(ds) / len(ds)
+    empirical_sd = (sum((x - mean) ** 2 for x in ds) / (len(ds) - 1)) ** 0.5
+    reported_se = sum(ses) / len(ses)
+    assert reported_se == pytest.approx(empirical_sd, rel=0.05)

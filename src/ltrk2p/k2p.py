@@ -22,9 +22,11 @@ class SubstCounts:
 def count_substitutions(a: str, b: str) -> SubstCounts:
     """Count substitution classes over two equal-length gapped aligned strings.
 
-    Gap columns are counted only in n_gapcols. Columns containing N (or any
-    non-ACGT residue) in either sequence are excluded entirely -- they inform
-    neither the numerator nor the denominator of the distance.
+    Assumes pre-sanitized uppercase input (via fasta.sanitize() upstream);
+    lowercase acgt is treated as ambiguous and excluded. Gap columns are counted
+    only in n_gapcols. Columns containing N (or any non-ACGT residue) in either
+    sequence are excluded entirely -- they inform neither the numerator nor the
+    denominator of the distance.
     """
     if len(a) != len(b):
         raise ValueError(f"aligned strings differ in length: {len(a)} vs {len(b)}")
