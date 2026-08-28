@@ -46,3 +46,14 @@ def test_read_fasta_record_with_no_sequence(tmp_path):
     p = tmp_path / "g.fa"
     p.write_text(">empty\n>next\nACGT\n")
     assert list(read_fasta(p)) == [("empty", ""), ("next", "ACGT")]
+
+def test_sanitize_covers_whitespace_classified_control_codes():
+    # 0x1c-0x1f, 0x85, 0xa0 are isspace()==True and were previously unmapped
+    for ch in "\x1c\x1d\x1e\x1f\x85\xa0":
+        assert sanitize(f"AC{ch}GT") == "ACGT", f"{ch!r} not handled"
+
+
+def test_sanitize_maps_non_ascii_to_N():
+    assert sanitize("AC中GT") == "ACNGT"       # CJK
+    assert sanitize("AC\U0001F600GT") == "ACNGT"   # emoji (astral plane)
+    assert sanitize("ACGTé") == "ACGTN"       # accented Latin

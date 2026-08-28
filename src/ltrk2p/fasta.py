@@ -5,15 +5,20 @@ import gzip
 from pathlib import Path
 from typing import Iterator
 
-_VALID = set("ACGT")
+class _Table(dict):
+    """Translation table covering every codepoint.
 
-# Translation table: ACGT (either case) -> uppercase, whitespace -> dropped,
-# everything else (IUPAC codes, *, -, digits) -> N.
-_TABLE = str.maketrans(
-    {chr(c): (chr(c).upper() if chr(c).upper() in _VALID else "N")
-     for c in range(256) if not chr(c).isspace()}
-    | {c: None for c in " \t\r\n\v\f"}
-)
+    ACGT (either case) -> uppercase; any whitespace -> dropped; everything
+    else (IUPAC codes, *, -, digits, non-ASCII) -> N. Using __missing__
+    rather than a prebuilt 256-entry table means codepoints >= 256 and the
+    whitespace-classified control codes are covered too.
+    """
+
+    def __missing__(self, key):
+        return None if chr(key).isspace() else "N"
+
+
+_TABLE = _Table({ord(c): c.upper() for c in "ACGTacgt"})
 
 
 def sanitize(seq: str) -> str:
