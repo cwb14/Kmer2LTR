@@ -68,3 +68,53 @@ def test_pywfa_real_orientation_is_query_first():
     assert a.replace("-", "") == query
     assert b.replace("-", "") == ref
     assert "I" in extended_cigar(a, b)   # extra base is in the QUERY -> I
+
+def test_cs_coalesces_multi_base_insertion_run():
+    a, b = "ACGT" + "ACGTAC" + "GT", "ACGT" + "------" + "GT"
+    assert extended_cigar(a, b) == "4=6I2="
+    assert cs_string(a, b) == ":4+acgtac:2"      # one +seq, not six
+
+
+def test_cs_coalesces_multi_base_deletion_run():
+    a, b = "ACGT" + "------" + "GT", "ACGT" + "ACGTAC" + "GT"
+    assert extended_cigar(a, b) == "4=6D2="
+    assert cs_string(a, b) == ":4-acgtac:2"      # one -seq, not six
+
+
+def test_cs_insertion_run_immediately_followed_by_deletion_run():
+    a, b = "AA--GT", "--CCGT"
+    assert extended_cigar(a, b) == "2I2D2="
+    assert cs_string(a, b) == "+aa-cc:2"
+
+
+def test_cs_pending_insertion_flushed_by_substitution():
+    """The pending-buffer transition most likely to be mishandled."""
+    a, b = "AG", "-C"
+    assert extended_cigar(a, b) == "1I1X"
+    assert cs_string(a, b) == "+a*cg"
+
+
+def test_roundtrip_with_substitutions_present():
+    """The shipped roundtrip fixture is pure I/D; this one includes X."""
+    import re
+    a, b = "ACGTA-CGTTGCA", "ACGT-GCGTAGCA"
+    cig = extended_cigar(a, b)
+    assert cig == "4=1I1D3=1X3="
+    assert cs_string(a, b) == ":4+a-g:3*at:3"
+    q, r = a.replace("-", ""), b.replace("-", "")
+    qi = ri = 0
+    qa, ra = [], []
+    for n, op in re.findall(r"(\d+)([=XID])", cig):
+        n = int(n)
+        if op in "=X":
+            qa.append(q[qi:qi + n]); ra.append(r[ri:ri + n]); qi += n; ri += n
+        elif op == "I":
+            qa.append(q[qi:qi + n]); ra.append("-" * n); qi += n
+        else:
+            qa.append("-" * n); ra.append(r[ri:ri + n]); ri += n
+    assert "".join(qa) == a and "".join(ra) == b
+
+
+def test_cs_string_rejects_unequal_lengths():
+    with pytest.raises(ValueError):
+        cs_string("ACGT", "ACG")

@@ -8,8 +8,10 @@ from __future__ import annotations
 # pywfa op codes. Note pywfa emits 0 ("M") for TRUE matches and 8 ("X") for
 # mismatches -- a mixed convention. Because X is emitted separately, 0
 # unambiguously means "equal" here, contrary to the SAM spec's meaning of M.
-# NOTE: pywfa uses 1=deletion (in query) and 2=insertion (in query), which is
-# backwards from the SAM spec. Empirically confirmed via test_pywfa_real_orientation_is_query_first.
+# NOTE: When calling pywfa as WavefrontAligner(query)(ref), binding pattern=query
+# and text=ref, pywfa's op codes are: 1=deletion (in query), 2=insertion (in query).
+# This is backwards from the SAM spec (where 1=I, 2=D). The mapping holds for this
+# calling convention; a caller passing sequences in the opposite order would flip it.
 _OP_EQ, _OP_INS, _OP_DEL, _OP_X = 0, 2, 1, 8
 
 
