@@ -78,9 +78,28 @@ writer. This is stated explicitly because mixing the two is the most likely sour
 off-by-one errors, and the tests assert the convention by slicing the input sequence with
 the reported coordinates.
 
-If the hit touches the inner edge of either window, double `W` and redo, up to
-`floor(L/2)`. **No LTR-length parameter exists anywhere in the tool**; cost tracks the
-actual LTR size rather than a worst-case guess.
+Double `W` and redo — up to `floor(L/2)` — if **either** the hit touches the inner edge of
+a window, **or** the hit is not significant.
+
+The second trigger is not redundant, and omitting it is a real failure mode. When
+`LTR length >= 2W`, the prefix window covers LTR-relative positions `[0, W)` while the
+suffix window covers `[LTR_len - W, LTR_len)` — **disjoint ranges**, so the two windows
+hold non-homologous parts of the same LTR and the best available alignment is background
+noise. Noise has no reason to land near a window edge, so an edge-only trigger never
+fires and the element is silently mis-called with a spurious hit. Measured with
+`W0 = 1500`: a hard cliff at exactly `2*W0` — LTRs of 1400/2500/2950 bp resolved 20/20,
+while 3000/4000/6000 bp resolved 2/20, 2/20 and 0/20. Maize Gypsy LTRs (1.3-2.5 kb) and
+legume Ogre/Tat LTRs (4-5 kb) fall in the failing range, so this is not a corner case.
+
+Growing on insignificance restores 20/20 at every length tested and leaves the common case
+unchanged (0.33 ms for a typical 400 bp-LTR element). Non-LTR input now grows to the
+ceiling before reporting no pair, bounded at ~23 ms for a 35 kb record.
+
+`floor(L/2)` is always sufficient: detection needs `W > LTR_len / 2`, and since an element
+contains two LTRs, `L >= 2 * LTR_len`, so `floor(L/2) >= LTR_len > LTR_len / 2`.
+
+**No LTR-length parameter exists anywhere in the tool**; cost tracks the actual LTR size
+rather than a worst-case guess.
 
 `W = floor(L/2)` is a hard ceiling. It makes the two LTR intervals disjoint by
 construction, so `ltr5_end < ltr3_start` cannot be violated, and it is sufficient: an
