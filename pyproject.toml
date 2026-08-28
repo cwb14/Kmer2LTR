@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ltrk2p"
+version = "0.1.0"
+description = "LTR-RT boundary classification and K2P divergence"
+requires-python = ">=3.10"
+dependencies = ["parasail", "pywfa", "numpy"]
+
+[project.scripts]
+ltrk2p = "ltrk2p.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
