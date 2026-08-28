@@ -181,9 +181,16 @@ calibrated against one is invalid against the other. Applying the generic-calibr
 threshold to calibrated scores made a 13 bp chance match report roughly double the bits and
 an E-value about 2^13 too small, which leaked spurious "outer pairs" out of unrelated
 flanking DNA in Stage 4 (measured 14 of 2500 elements, every instance at low divergence;
-zero after gating on the generic matrix). The division of labour is therefore explicit: the
-**calibrated matrix determines the alignment and the boundaries; the generic matrix
-determines significance.**
+zero after gating on the generic matrix). The division of labour is therefore explicit: **the generic matrix determines significance
+everywhere.** For the element's own LTR pair, the calibrated matrix still determines the
+alignment and the boundaries — it is calibrated to exactly that pair. Stage 4 is the one
+exception and uses the generic matrix for its boundary recovery too, because the outer pair
+it is searching for is a *different, uncharacterised* pair whose divergence the calibrated
+matrix does not describe; scoring it with a matrix tuned to the inner pair both leaked false
+positives and degraded the true positives it did find (outer-pair boundaries correct
+118/120 with the calibrated matrix, 120/120 with the generic one). Sensitivity of the
+generic-scored outer search was verified out to 35% divergence (40/40 detected and correct
+at 20-35%, degrading only at an unrealistic 40%).
 
 Because gapped alignment perturbs the analytic `K` and `lambda`, the threshold is **not
 trusted analytically**. It is calibrated empirically against the negative controls of
