@@ -467,6 +467,22 @@ commands, expected outputs, and notes.
 - **AT-rich and low-complexity flanks** may invite over-extension. Composition-adjusted
   scoring is the mitigation; the benchmark determines whether it suffices. A
   low-complexity diagnostic column is added only if the data demands one.
+- **Composition adjustment can invert `match > transition > transversion` at high
+  divergence under strong base-composition skew** (d >~ 0.5 with skew as mild as 65/35;
+  and specific cross-pair comparisons such as a common-base transition scoring below a
+  rare-to-rare transversion can invert at lower d). This is not a defect: matching a very
+  common base genuinely carries less evidence than a substitution involving a rare one, and
+  it is the same rare-residue log-odds inflation seen in BLOSUM-style matrices. It is a
+  property of *any* composition-adjusted log-odds matrix, present identically before and
+  after the symmetry fix, on exactly the same set of (composition, d, kappa) combinations.
+  The `calibrated vs fixed +1/-1` ablation in section 6.4 is what determines empirically
+  whether it costs accuracy at the divergences this tool targets; if it does, the remedy is
+  to drop composition adjustment, not to hand-patch the ordering.
+- **Integer scaling at `SCALE = 4` can round a transition and a transversion score to a
+  tie** at the extreme edge (measured 20 of 2880 grid points, all at d >= 0.4 with strong
+  skew). It never *inverts* a correctly ordered pair (0 of 2880). Pre-existing and
+  unaffected by the symmetry fix; raising SCALE is the remedy if the benchmark shows it
+  matters.
 - **Saturation.** Beyond d ~ 0.6-0.7 K2P becomes unstable and eventually undefined. The
   tool reports `NA` rather than a misleading number, and the benchmark characterises where
   the variance becomes unacceptable.
