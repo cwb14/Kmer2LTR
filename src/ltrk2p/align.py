@@ -12,7 +12,27 @@ GAP_EXTEND = 2 * SCALE    # 2 bits
 MIN_LEN = 100             # shorter than this cannot hold two LTRs plus internal
 W0 = 1500
 EDGE = 20                 # touching within this many bp of the inner edge -> grow
-MAX_EVALUE = 1e-3         # significance floor; Task 8 reuses this same constant
+MAX_EVALUE = 1e-10        # significance floor; Task 8 reuses this same constant
+# Task 16 calibrated this against bench/out/negatives.fa (46,823 real non-LTR
+# TEs: DNA transposons, LINEs, SINEs, Helitrons, satellites) and a dinucleotide
+# -shuffled null. The shuffled null is clean at any threshold tested (<=0.02%
+# throughout), so false "pass" calls on negatives.fa are not chance alignment
+# noise -- they come from real, strongly-significant direct terminal repeats
+# inside specific TE subclasses (satellites definitionally; a handful of
+# library-consensus entries in Helitron/CACTA/hAT/Jockey that are themselves
+# near-exact tandem constructions), which no significance threshold can
+# separate from a true LTR pair without the family classification this tool
+# explicitly declines to do (see "Non-goals"). At the old default (1e-3),
+# false-"pass" rate on negatives.fa was 9.09%; tightening alone never reaches
+# <1% without unacceptable true-positive cost: 2.86% FP still costs 9.8
+# points of arab_ltr_all_clean pass rate at 1e-30, and even 1e-200 (0.41% FP)
+# collapses real-data pass rate to 31%. 1e-10 is the last point before that
+# cliff: FP nearly halves (9.09%->5.23%) while arab_ltr_all_clean pass rate
+# moves only 99.80%->99.67% (13/10307 records). The cost concentrates in the
+# tool's already-hardest population (d_nominal in {0.4,0.5}, no added flank,
+# on the real gold-perturbed grid: 72.8%->53.8%) -- an amplification of an
+# existing high-divergence weakness, not a new failure mode. Full sweep:
+# bench/out/memo_real.md.
 
 
 @dataclass(frozen=True)
@@ -109,7 +129,17 @@ def calibrate(S: str, hit: Hit):
     return parasail_matrix(logodds_bits(d_hat, kappa_hat, freqs)), d_hat, kappa_hat
 
 
-T_BITS = 5.0     # evidence required to claim a flank exists; benchmark-calibrated
+T_BITS = 10.0    # evidence required to claim a flank exists; benchmark-calibrated
+# Task 14 swept {2,5,8,10,15,20,30} on 260,876 perturbed REAL gold elements
+# (bench/out/cells_tbits_*.json, bench/out/memo_bench.md). At the old default
+# (5.0), false-flank rate at d=0.3 was 26.8%; at 10.0 it is 8.5% (a 3.2x drop),
+# while large-flank detection is nearly unchanged (det@50 93.0%->91.3%,
+# det@100 91.7%->91.6%). The cost lands on 10-20bp flanks (det@10 75.5%->
+# 39.4%, det@20 88.8%->70.5%), which the spec already documents as sitting
+# near the detection floor. Applied in Task 16; see docs/
+# 2026-08-28-ltrk2p-design.md and bench/out/
+# task-14-report.md for the full sweep and the rejected divergence-aware
+# alternative (a real Pareto improvement, deliberately not implemented yet).
 
 
 @dataclass(frozen=True)

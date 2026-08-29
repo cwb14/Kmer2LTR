@@ -248,6 +248,42 @@ and 50 bp or larger essentially always, with called length accurate to under a b
 at t=0, 3.8% at t=5, 0% at t=10 but with true-flank detection falling to 83.8%, and at
 t=25 the degenerate 0%/0% regime where no flank is ever called.
 
+**Task 16 update — `T_BITS` raised to 10.0, on real data, not the synthetic sweep above.**
+The synthetic calibration above under-stated the false-flank problem badly: Task 14 swept
+`t_bits in {2,5,8,10,15,20,30}` over 260,876 records built by perturbing 1,694 REAL gold
+elements (arabidopsis + human + library-consensus truth.fa) with known added flank length —
+`bench/out/gold_perturbed.fa`/`gold_truth.tsv`, scored per-cell in
+`bench/out/cells_tbits_*.json`, full sweep table in `bench/out/memo_bench.md` and
+`bench/out/memo_bench.md`. On that real-sequence grid, the
+shipped default of 5.0 gave a false-flank rate of **26.8% at d=0.3** (42.6% at d=0.4) — a
+~20x gap from what synthetic-only calibration suggested. At `t_bits=10`:
+
+| d | false-flank @ t=5 | false-flank @ t=10 |
+|---|---|---|
+| 0.05 | 4.13% | 0.65% |
+| 0.10 | 7.62% | 2.04% |
+| 0.20 | 16.12% | 4.52% |
+| 0.30 | 26.76% | 8.47% |
+| 0.40 | 42.61% | 17.33% |
+
+a 2.5-3.6x reduction across the range, while large-flank detection — the practically
+important failure mode, catching genuine overextension — is nearly unchanged: det@50 falls
+93.0% -> 91.3% (1.7 points) and det@100 barely moves, 91.7% -> 91.6%. The cost concentrates
+entirely on 10-20 bp flanks (det@10 75.5% -> 39.4%, det@20 88.8% -> 70.5%), which section 7
+already documents as sitting near the theoretical detection floor. **`T_BITS = 10.0` is now
+the shipped default** (`src/ltrk2p/align.py`); `--flank-bits` follows it automatically.
+
+A **divergence-aware `T_BITS`** (varying the threshold per-element with the tool's own
+`calibrate()`-estimated `d_hat`) was also measured and is a genuine, non-cherry-picked
+Pareto improvement over any single fixed threshold — e.g. a modest per-bin schedule reaches
+4.3% pooled false-flank rate at the *same* det@10 as the flat `t=10` recommendation (40.2%
+vs 40.3%), and beats the nearest fixed threshold matching its false-flank rate (`t=15`,
+3.7%) by +26 points of det@10 and +11 of det@20. **Not implemented.** This task recommends
+the value, not a schedule; picking a per-bin schedule needs an explicit detection floor,
+not just a false-flank target, or it overcorrects exactly where catching overextension
+matters most (see `task-14-report.md`, "Does a divergence-aware threshold help?"). Recorded
+here as future work, deliberately deferred.
+
 The fix is to ask directly whether homology reaches each terminus, as an exact model
 comparison rather than a greedy endpoint:
 
@@ -282,8 +318,24 @@ This is what makes a retained (un-excised) nested element report the outer eleme
 rather than the nested element's, which are typically younger and would otherwise score
 higher. The check is cheap because it runs only when a flank was called.
 
-**This stage is provisional.** The benchmark measures how often it changes the answer on
-real data; if the answer is never, it is deleted rather than kept "just in case."
+**Measured on real data, and kept.** Task 14 compared Stage 4 on/off on the raw, unperturbed
+real datasets (deliberately not the gold-perturbed grid, whose gold-selection criteria
+require clean non-overextended raw boundaries and so structurally exclude the nested-element
+scenario this stage exists to recover):
+
+| dataset | n | n_changed | fraction |
+|---|---|---|---|
+| arabidopsis | 10,307 | 110 | 1.07% |
+| human | 16,336 | 299 | 1.83% |
+| truth.fa (library consensus) | 31,315 | 4 | 0.01% |
+| **total** | **57,958** | **413** | **0.71%** |
+
+Non-zero, and non-trivially so on genuine raw genomic calls (up to 1.83% on human) — the
+deletion criterion above is not met, so Stage 4 stays. Every changed record recovers the
+outer pair exactly as designed (verified by inspection, e.g. arabidopsis
+`LR999451.1:10387972-10390268#LTR/unknown/unknown`: `[6-166]`/`[2144-2297]` with Stage 4 vs.
+a much shorter, more central `[850-1135]`/`[1150-1438]` without it). Full detail:
+`bench/out/stage4_diff_*.json`, `bench/out/memo_bench.md`.
 
 ### Stage 5 — refinement and reporting
 
@@ -312,13 +364,17 @@ is emitted separately, `M` here unambiguously means "equal" despite the SAM spec
 contrary meaning. Conversion to extended CIGAR is `M -> =`. This is pinned down here
 because silently mis-reading it would corrupt column 23.
 
-**Open trade-off, resolved by ablation.** WFA2-lib supports only a uniform mismatch
-penalty, not the ti/tv-aware calibrated matrix from Stage 2. Boundaries come from
-Stages 1-4 (parasail, calibrated matrix), so only the internal alignment path is affected,
-and the effect on K2P is expected to be second-order. The benchmark measures whether the
-calibrated matrix materially changes K2P at high divergence. If it does, Stage 5 switches
-to parasail above a measured crossover; if not, WFA is used throughout and the tool stays
-simpler.
+**Resolved: keep WFA everywhere, no crossover to parasail.** WFA2-lib supports only a
+uniform mismatch penalty, not the ti/tv-aware calibrated matrix from Stage 2. Boundaries
+come from Stages 1-4 (parasail, calibrated matrix), so only the internal alignment path is
+affected. Task 14's `wfa_vs_matrix` ablation (`refine="matrix"` vs the default `"wfa"`,
+identical boundaries by construction, measured on the 260,876-record real gold-perturbed
+grid) found the opposite of "second order": switching to the calibrated matrix roughly
+**doubles the K2P bias magnitude** in both the correctly-bounded population (-0.0087 ->
+-0.0156) and the flank-called population (-0.0066 -> -0.0134), with no reliable RMSE gain
+(marginally better in one population, worse in the other). No crossover divergence exists
+where the calibrated matrix wins outright, so WFA stays the aligner at every divergence
+level. Full table: `bench/out/memo_bench.md`, `task-14-report.md`.
 
 ### K2P
 
@@ -365,6 +421,26 @@ Two things are done instead:
    default. If it trades bias for variance, it does not. The evidence decides, and if the
    benefit turns out to be confined to the flank-called subset, the trim is applied only
    there.
+
+   **Resolved: `trim=0` stays the default, in both populations.** Measured on the same
+   260,876-record real gold-perturbed grid (`d_nominal` as ground truth, matching
+   `gold_robustness.score_gold`'s convention), comparing trim in {0,3,5,10}:
+
+   | population (n) | trim | bias | RMSE |
+   |---|---|---|---|
+   | correctly-bounded, no flank called (49,259) | 0 | -0.0087 | 0.0761 |
+   | | 10 | -0.0102 | 0.0761 |
+   | flank-called subset (195,404) | 0 | -0.0066 | 0.0508 |
+   | | 10 | -0.0045 | 0.0508 |
+
+   In the correctly-bounded population RMSE is flat to 3 significant figures at every trim
+   depth and bias does not improve — exactly the "costs data, removes no bias" prediction
+   above. In the flank-called subset, bias genuinely moves toward zero as trim grows (a real
+   ~32% relative reduction, -0.0066 -> -0.0045) — the predicted correction for retained
+   flank contamination — but RMSE does not move (0.0508 -> 0.0508): the variance cost of
+   losing sites at these trim depths cancels the bias gain. Adopting a trim requires
+   reducing RMSE, not just bias; neither population clears that bar, so no trim is applied
+   anywhere. Full per-trim-depth table: `bench/out/memo_bench.md`, `task-14-report.md`.
 2. **Uncertain elements are flagged, not silently degraded.** Stage 3 already computes its
    decision margin, so column `flank_margin_bits` reports how decisively each boundary
    call was made. Filtering ambiguous *elements* downstream is statistically cleaner than
@@ -493,15 +569,15 @@ keeps them from being confounded, which is the usual way this kind of benchmark 
 
 Every design element must earn its place:
 
-| Ablation | Expectation |
-|---|---|
-| BLASTN-style 1/-3 scoring baseline | fails badly past ~20% divergence (break-even ~75% identity) |
-| fixed +1/-1 vs. calibrated log-odds | quantifies what Stage 2 buys |
-| Stage 3 on/off | headline: the ~46% false-flank rate at p=0.25 should collapse |
-| Stage 4 on/off | delete Stage 4 if it never fires |
-| WFA uniform penalty vs. calibrated matrix in Stage 5 | decides the Stage 5 aligner |
-| Stage 1 iteration count | confirms one recalibration pass suffices |
-| terminal trim of 0/3/5/10 bp per LTR end | decides whether trimming is adopted; measured for bias *and* RMSE, overall and within the flank-called subset |
+| Ablation | Expectation | Result (Task 14/16, measured on the 260,876-record real gold-perturbed grid) |
+|---|---|---|
+| BLASTN-style 1/-3 scoring baseline | fails badly past ~20% divergence (break-even ~75% identity) | confirmed: pooled false-flank 46.4% vs calibrated's 20.2%; crosses 50% between d=0.2 (46.1%) and d=0.3 (74.5%), matching the predicted ~75% identity break-even |
+| fixed +1/-1 vs. calibrated log-odds | quantifies what Stage 2 buys | fixed_1_1 sits between calibrated and blastn_1_3 throughout (pooled false-flank 28.6%); calibration roughly halves the false-flank rate fixed_1_1 would otherwise show at moderate-high d |
+| Stage 3 on/off | headline: the ~46% false-flank rate at p=0.25 should collapse | confirmed: no_stage3 pooled false-flank 56.2% vs calibrated (Stage 3 on) 20.2%; on synthetic perfectly-bounded elements at p=0.25, raw SW is wrong 63/80 (79%) vs Stage 3's 1/80 (1.2%), a 63x improvement |
+| Stage 4 on/off | delete Stage 4 if it never fires | **kept** — fires on 0.71% of raw real predictions (413/57,958: arabidopsis 1.07%, human 1.83%, truth.fa 0.01%), always recovering the outer pair; see Stage 4 section above |
+| WFA uniform penalty vs. calibrated matrix in Stage 5 | decides the Stage 5 aligner | **WFA kept everywhere** — the calibrated matrix roughly doubles K2P bias magnitude with no reliable RMSE gain; see Stage 5 section above |
+| Stage 1 iteration count | confirms one recalibration pass suffices | not measured in Task 14/16 (out of scope); `classify()` still performs exactly one recalibration pass (`discover` -> `calibrate` -> `discover` again), unchanged |
+| terminal trim of 0/3/5/10 bp per LTR end | decides whether trimming is adopted; measured for bias *and* RMSE, overall and within the flank-called subset | **not adopted, `trim=0` stays default** — RMSE flat at every trim depth in both populations; trim_10 cuts flank-called-subset bias ~32% but RMSE is unchanged (variance from fewer sites cancels it); see "Terminal sites are not trimmed by default" above |
 
 ### 6.5 Real data, three independent checks
 
@@ -514,11 +590,81 @@ Every design element must earn its place:
    informative.
 3. **TSD detection** at called flanks — a second independent signal, same logic.
 
+**Task 16 ran all three** against the final defaults (T_BITS=10.0, MAX_EVALUE=1e-10;
+`bench/out/real_*.tsv`, job `20201250`, 256,776 records across the seven datasets in
+00:05:06). Headline: on every genomic/putative-intact dataset (arabidopsis, poa, human,
+plus MTEC's maize library), boundaries the tool calls perfectly-bounded (`flank_len==0`)
+land on `TG`...`CA` 4-10x more often than boundaries it calls flank-corrected, and at or
+above the raw-input-ends baseline — an unbiased, tool-blind confirmation the boundary logic
+is doing its job. TSD presence at flank-called boundaries is 3-7x enriched over a shifted-
+10bp local control at k=5 on every dataset with enough records to be meaningful. Full
+tables, per-dataset breakdown, and the before/after comparison against the pre-Task-16
+defaults: `bench/out/memo_real.md`.
+
 ### 6.6 Negative controls
 
 Dfam and Repbase non-LTR entries (DNA transposons, LINEs, SINEs, Helitrons) plus shuffled
-sequence, measuring the false-positive rate for `status = pass`. This sets
-`--min-bitscore`.
+sequence, measuring the false-positive rate for `status = pass`. This sets `MAX_EVALUE`
+(and, through it, `--min-bitscore`'s effective floor).
+
+**Task 16 measured this against `bench/out/negatives.fa`** (46,823 real non-LTR TEs from
+two independent libraries -- Dfam-RepeatMasker and Repbase, plus MTEC and riceTElib --
+with LTR-class and ambiguous tyrosine-recombinase classes excluded) and a mononucleotide-
+shuffled null drawn from the library-consensus truth set (`bench/simulate.shuffle_dinuc`,
+the same "shuffle" null section 6.2 already uses). Sweeping `MAX_EVALUE`:
+
+| MAX_EVALUE | negatives.fa `pass` rate | shuffled-null `pass` rate | arab_ltr_all_clean `pass` rate | hardest real-gold cells (d=0.4-0.5, no flank) `pass` rate |
+|---|---|---|---|---|
+| 1e-2 | 10.53% | 0.019% | -- | -- |
+| 1e-3 (old default) | 9.09% | 0.003% | 99.80% | 72.80% |
+| 1e-4 | 7.87% | 0.000% | -- | -- |
+| 1e-6 | 6.60% | 0.000% | -- | -- |
+| 1e-8 | 5.79% | 0.000% | -- | -- |
+| **1e-10 (new default)** | **5.23%** | **0.000%** | **99.67%** | **53.78%** |
+| 1e-30 | 2.86% | -- | 90.19% | 20.96% |
+| 1e-50 | 2.14% | -- | 74.90% | 11.36% |
+| 1e-100 | 1.36% | -- | 55.35% | 3.99% |
+| 1e-200 | 0.41% | -- | 31.14% | 2.58% |
+
+**The shuffled null is clean at every threshold tested** (<=0.02% throughout, 0% at the
+new default) -- confirming the residual `negatives.fa` false-"pass" rate is not chance
+alignment noise near a significance boundary. It is real, strongly-significant direct
+terminal-repeat structure inside specific TE subclasses, confirmed by inspecting the
+records that still pass at extreme thresholds (e.g. `EnSpm-N1a_CR`, bitscore 757,
+`k2p=0.0`, flank5_len=flank3_len=0 -- the entire 1,514 bp record is an exact 757 bp direct
+repeat with nothing else in it; `TART-A`, a Drosophila telomeric retrotransposon with a
+known, genuine terminal-repeat-like structure despite its non-LTR classification). Breaking
+the residual down by class at an extreme threshold (1e-200) confirms it is concentrated,
+not diffuse: Satellite entries pass at 6.7-37-100% depending on source library (tandem
+repeats are close to tautologically "terminal-repeat-like"), tRNA/rRNA/Simple-Repeat
+(small n, inherently repetitive) similarly high, Helitron/Neptune 1.6-3.6% (library-
+consensus internal duplication), and a long tail of individual entries across many other
+classes each under ~1.2% -- while the numerically dominant classes (hAT, Mariner/Tc1, L1,
+MuDR, DNA, EnSpm/CACTA) are at or below ~0.1-0.8%. No `MAX_EVALUE` threshold can separate
+these without the family classification this tool's own "Non-goals" (section 1) explicitly
+declines to perform.
+
+**Reaching <1% false-`pass` on `negatives.fa` is achievable only at unacceptable cost to
+true positives**, and this is the operative finding: false-`pass` rate falls only slowly
+as `MAX_EVALUE` tightens (9.09% -> 5.23% -> 2.86% -> ... -> 0.41% at 1e-200), while real-
+data sensitivity collapses much faster and much earlier. On `arab_ltr_all_clean.fa.gz`
+(10,307 real, structurally-supported LTR-RT calls -- exactly the tool's stated input
+contract, not an edge case), `pass` rate is still 99.67% at `MAX_EVALUE=1e-10` but falls to
+90.2% by `1e-30` (2.86% FP -- still nowhere near the 1% target) and to 55.3% by `1e-100`
+(1.36% FP -- just barely above target). The cost concentrates earliest and worst in exactly
+the population the tool is supposed to serve at the divergent end of its range: the
+hardest real gold-perturbed cells (d_nominal in {0.4, 0.5}, no added flank -- correctly-
+bounded, high-divergence, the lowest-bitscore-per-base population by construction) already
+lose over a quarter of their `pass` calls between the old and new default (72.8% -> 53.8%),
+and that population is reduced to noise (<4%) by `1e-100`. **`MAX_EVALUE = 1e-10` is the
+new default**: it is the last point before the steep part of this cost curve (arab
+`pass` rate moves only 13/10,307 records) while nearly halving the false-`pass` rate on
+real non-LTR TEs (9.09% -> 5.23%, a genuine, substantial improvement). It does **not**
+reach <1%, and no threshold does at acceptable cost; this is reported as a measured,
+inherent limitation rather than forced past the point the data supports. Full sweep,
+per-class breakdown and example records: `bench/out/memo_real.md`,
+`bench/out/negatives_diagnosis.json`, `bench/out/maxevalue_sweep.json`,
+`bench/out/maxevalue_truepos_sweep.json`.
 
 ### 6.7 Cross-check
 
