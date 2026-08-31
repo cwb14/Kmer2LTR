@@ -349,9 +349,16 @@ def _extend(outer: str, inner: str, matrix, gaps: Gaps, t_bits: float,
         return len(outer), res.end_ref + 1, margin
     # Not homologous all the way out. Find the furthest endpoint still above the
     # noise floor. H(k) = best score consuming exactly k outer bases; H(0) = 0.
+    #
+    # This is the one call that materialises a full DP table, so both sides are
+    # capped: the table is len(q) x len(r) int32, and an uncapped pathological
+    # record (a 17 kb flank candidate against a 34 kb partner) would allocate
+    # ~2 GB per worker. Capping the partner by the CAPPED query length, not by
+    # the original outer length, is what keeps that bound real.
     q = outer[:EXT_CAP]
+    r = inner[:2 * len(q) + EXT_REF_SLACK]
     tab = np.asarray(parasail.sg_de_table_striped_sat(
-        q, inner, gaps.open, gaps.extend, matrix).score_table)
+        q, r, gaps.open, gaps.extend, matrix).score_table)
     H = tab.max(axis=1)
     ok = np.nonzero(H > -t_bits * SCALE)[0]
     if not len(ok):

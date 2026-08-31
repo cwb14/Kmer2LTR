@@ -44,8 +44,17 @@ Reference throughout is the shipped flat `t_bits = 10`.
    diverged one. This is a regulariser -- it makes the schedule a shape rather
    than seven independent point estimates, and it cannot be gamed by a noisy bin.
 
-5. A bin holding fewer than `MIN_BIN_N` flank-bearing records at the reference is
-   not estimated at all; it inherits the previous bin's value.
+5. A bin holding fewer than `MIN_BIN_N` flank-bearing records on the GOLD grid at
+   the reference is not estimated at all; it inherits the previous bin's value.
+   Where the HOMOLOGY grid falls below `MIN_BIN_N` in a bin it abstains from
+   step 2 rather than vetoing it: the homology grid's substitution axis stops at
+   35% mutated, so it has little mass in the top `d_hat` bins by construction,
+   and letting a structurally empty bin veto would discard the gold grid's
+   evidence exactly where the false-flank problem is worst.
+
+   (Amended 2026-08-31, after the rule was first committed but BEFORE the sweep
+   it consumes had produced a single number -- the amendment is forced by the
+   grid's known divergence coverage, not by any result.)
 """
 from __future__ import annotations
 
@@ -159,12 +168,14 @@ def derive(gold_by_t: dict, hom_by_t: dict, verbose: bool = True):
     chosen: dict[float, float] = {}
     rows = []
     for b in DHAT_LABELS:
-        if ref_g[b]["n_flank"] < MIN_BIN_N or ref_h[b]["n_flank"] < MIN_BIN_N:
-            rows.append({"bin": b, "t": None, "why": "bin too small"})
+        if ref_g[b]["n_flank"] < MIN_BIN_N:
+            rows.append({"bin": b, "t": None, "why": "gold bin too small"})
             continue
+        hom_votes = ref_h[b]["n_flank"] >= MIN_BIN_N
         adm = [t for t in ts
                if _admissible(gold_by_t[t][b], ref_g[b], GOLD_LARGE, GOLD_MID)
-               and _admissible(hom_by_t[t][b], ref_h[b], HOM_LARGE, HOM_MID)]
+               and (not hom_votes
+                    or _admissible(hom_by_t[t][b], ref_h[b], HOM_LARGE, HOM_MID))]
         if not adm:
             adm = [REFERENCE_T]
         meets = [t for t in adm
