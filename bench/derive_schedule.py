@@ -231,8 +231,12 @@ def as_python(schedule) -> str:
         else:
             out.append((e, t))
         prev = t
-    body = ",\n    ".join(
-        f"({'float(\"inf\")' if e == float('inf') else f'{e:g}'}, {t:g})" for e, t in out)
+    inf_literal = 'float("inf")'
+    parts = []
+    for e, t in out:
+        edge = inf_literal if e == float("inf") else f"{e:g}"
+        parts.append(f"({edge}, {t:g})")
+    body = ",\n    ".join(parts)
     return f"T_BITS_SCHEDULE = (\n    {body},\n)"
 
 

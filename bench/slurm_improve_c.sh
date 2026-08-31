@@ -38,4 +38,18 @@ $PY bench/homology_grid.py score --truth bench/out/homology_truth.tsv \
     --pred "$O/final_homology.tsv" --out "$O/cells_hom_FINAL.json"
 $PY -m ltrk2p bench/out/gold_perturbed.fa -o "$O/final_gold.tsv" -t 20 -v
 
+# Row-count invariant: one output row per input record, on every dataset.
+bash bench/out/_scratch6/verify_rowcounts.sh "$O"
+
+# TG..CA and TSD -- signals the tool never uses, so they are unbiased external
+# accuracy proxies. Secondary evidence: the homology grid is the primary check
+# precisely because it needs no proxy at all.
+$PY bench/out/_scratch6/tgca_tsd_check.py "$(cat <<'JSON'
+[["/anvil/projects/x-bio250178/chris/LTRRT6/arab_ltr_all_clean.fa.gz","bench/out/improve/real_arab_ltr_all_clean.tsv","arabidopsis"],
+ ["/anvil/projects/x-bio250178/chris/LTRRT6/human_ltr_all_clean.fa.gz","bench/out/improve/real_human_ltr_all_clean.tsv","human"],
+ ["/anvil/projects/x-bio250178/chris/LTRRT6/poa_ltr_all_clean.fa.gz","bench/out/improve/real_poa_ltr_all_clean.tsv","poa"],
+ ["/anvil/projects/x-bio250178/chris/LTRRT6/MTEC/maizeTE04092026","bench/out/improve/real_maizeTE04092026.tsv","mtec"]]
+JSON
+)" "$O/tgca_tsd.json"
+
 echo "=== Job C complete: $(date) ==="
