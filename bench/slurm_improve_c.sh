@@ -37,6 +37,12 @@ $PY -m ltrk2p bench/out/homology_grid.fa -o "$O/final_homology.tsv" -t 20 -v
 $PY bench/homology_grid.py score --truth bench/out/homology_truth.tsv \
     --pred "$O/final_homology.tsv" --out "$O/cells_hom_FINAL.json"
 $PY -m ltrk2p bench/out/gold_perturbed.fa -o "$O/final_gold.tsv" -t 20 -v
+$PY -c "
+import sys; sys.path.insert(0,'bench'); sys.path.insert(0,'src')
+from bench.run_bench import score_gold_grid, cells_to_json
+cells_to_json(score_gold_grid('bench/out/gold_truth.tsv', '$O/final_gold.tsv'),
+              '$O/cells_gold_FINAL.json')
+print('scored final_gold')"
 
 # Row-count invariant: one output row per input record, on every dataset.
 bash bench/out/_scratch6/verify_rowcounts.sh "$O"

@@ -1,7 +1,7 @@
 # ltrk2p — LTR boundary classification and K2P divergence
 
-**Date:** 2026-08-28
-**Status:** design approved, pending spec review
+**Date:** 2026-08-28 (revised 2026-08-31)
+**Status:** implemented; defaults set from benchmark evidence
 
 ## 1. Purpose
 
@@ -308,6 +308,15 @@ entirely on 10-20 bp flanks (det@10 75.5% -> 39.4%, det@20 88.8% -> 70.5%), whic
 already documents as sitting near the theoretical detection floor. **`T_BITS = 10.0` is now
 the shipped default** (`src/ltrk2p/align.py`); `--flank-bits` follows it automatically.
 
+**Task 14's sweep was measured at `MAX_EVALUE = 1e-3`, and `T_BITS = 10` shipped
+alongside `MAX_EVALUE = 1e-10`.** Discovered 2026-08-31 and verified directly: records
+that `bench/out/gold_pred_tbits_10.tsv` reports as `pass` are `no_pair` under the same
+pre-campaign code at 1e-10 and `pass` at 1e-3. Every number in the Task 14 block above
+therefore describes a significance regime that was never shipped. The sweep has been
+re-run at 1e-10; the re-measured reference curve is in `bench/out/memo_improve.md`.
+`T_BITS = 10` remains the fixed fallback — the re-measured curve does not overturn it —
+but the numbers supporting it are the new ones, not those above.
+
 A **divergence-aware `T_BITS`** (varying the threshold per-element with the tool's own
 `calibrate()`-estimated `d_hat`) was also measured and is a genuine, non-cherry-picked
 Pareto improvement over any single fixed threshold — e.g. a modest per-bin schedule reaches
@@ -318,6 +327,41 @@ the value, not a schedule; picking a per-bin schedule needs an explicit detectio
 not just a false-flank target, or it overcorrects exactly where catching overextension
 matters most (see `task-14-report.md`, "Does a divergence-aware threshold help?"). Recorded
 here as future work, deliberately deferred.
+
+**Shipped 2026-08-31 under an explicit, pre-registered detection floor.** The rule is in
+`bench/derive_schedule.py`, committed before the sweep it consumes had produced a single
+number so it could not be tuned to its own answer. In brief: the target false-flank rate
+is the flat reference's *own pooled* rate, so the schedule is calibrated to be no worse
+overall and only changes how uniformly that rate is spread across divergence; a `t` is
+admissible in a bin only if large-flank detection stays within 2 points, mid-flank within
+5, and pair loss within 2, **on both grids wherever both have evidence**; the chosen `t`
+is the smallest admissible one meeting the target, and the bins are then forced monotone.
+
+```
+T_BITS_SCHEDULE = ((0.025, 2), (0.15, 8), (float("inf"), 10))
+```
+
+**The shape is the opposite of what Task 14's illustrative schedules suggested.** They
+tightened the threshold at high divergence; the floor rules that out — `t=15` and `t=20`
+are inadmissible in *every* bin, because they cost more large-flank detection than the
+floor permits. What survives instead is a relaxation at low divergence, where false flanks
+are cheap and boundaries unambiguous: in the `d_hat < 0.025` bin, `t=2` lifts 5 bp flank
+detection from 83.7% to 98.9% for 1.5 points of false-flank rate.
+
+**Its size is modest, and smaller than Task 14 projected.** Against flat `t=10` on the
+same population the schedule is worth +6.0 points of det@10 and +2.1 of det@20 on the gold
+grid (+6.0 and +2.6 at 5 and 25 bp on the homology grid) for +0.4 to +0.6 points of
+false-flank rate, with pair loss unchanged. Against a flat threshold *re-tuned to the same
+false-flank rate* — the harder and fairer comparison — it is worth +3.7 points of det@10
+and +2.6 of det@5, and costs 0.0 to 1.4 points at every larger flank length. Two reasons
+it is smaller than projected: Task 14's schedules were evaluated at `MAX_EVALUE = 1e-3`,
+and they were layered on a pipeline with fixed gap penalties, which leaves far more
+small-flank sensitivity on the table for a threshold schedule to recover than the
+per-element gap model does.
+
+The homology grid's sweep also shows the top of the `t_bits` range is simply dominated:
+`t=30` and `t=20` reach the same false-flank rate (0.0008), but `t=30` detects a third as
+many 25 bp flanks and loses 47% more pairs outright.
 
 **Stage 3 takes its extension regions from the internal region, not the discovery
 window (2026-08-31).** The partner region for the 5' test used to be
@@ -731,6 +775,11 @@ Every design element must earn its place:
 | Stage 4 on/off | delete Stage 4 if it never fires | **kept** — fires on 0.71% of raw real predictions (413/57,958: arabidopsis 1.07%, human 1.83%, truth.fa 0.01%), always recovering the outer pair; see Stage 4 section above |
 | WFA uniform penalty vs. calibrated matrix in Stage 5 | decides the Stage 5 aligner | **WFA kept everywhere** — the calibrated matrix roughly doubles K2P bias magnitude with no reliable RMSE gain; see Stage 5 section above |
 | Stage 1 iteration count | confirms one recalibration pass suffices | not measured in Task 14/16 (out of scope); `classify()` still performs exactly one recalibration pass (`discover` -> `calibrate` -> `discover` again), unchanged |
+| **gap penalties: fixed 6/2 vs fixed 10/1 vs per-element** (2026-08-31) | decides whether the indel-rate estimate Stage 2 specifies is worth using | **per-element adopted.** At matched false-flank rate it dominates fixed 6/2 on every flank length of the homology grid (+10.5 points at 5 bp, +7.5 at 25, +2.1 at 45, +0.7 at 65) while losing fewer pairs; on the gold grid it trades -1.7 points at 50 bp for +14.0 at 10 bp. Cuts K2P RMSE 35% and bias 52% on the indel panel. Costs +2.6% runtime |
+| **composition from the LTR core vs the whole element** (2026-08-31) | tests whether the log-odds denominator should describe the repeat or its surroundings | **rejected** — worse on every panel of both grids (homology `bnd_mae` 3.29 -> 3.79, det@25 79.2% -> 74.1%, false-flank 0.20% -> 0.41%) |
+| **graded flank extension vs the binary snap** (2026-08-31) | tests whether a flank call should be a position rather than a verdict | **rejected** — the unpenalised form is provably a no-op (0 of 1,194 records); the `-T`-thresholded form costs 2.7x boundary error and 28x K2P bias for no false-flank gain |
+| **joint inner boundaries** (2026-08-31) | tests whether the inner ends being by-products of the outer snaps costs accuracy | **rejected** — fires on 418 of 62,644 records, right more often than wrong (276/140) but wrong by far more (mean inner error 242 -> 557); pooled error unchanged |
+| **non-destructive significance gate** (2026-08-31) | tests whether labelling beats deleting | **adopted** — recovers 1,386 of 70,000 records, verified to change no field of any record the old gate accepted (0 of 62,648), at zero runtime cost |
 | terminal trim of 0/3/5/10 bp per LTR end | decides whether trimming is adopted; measured for bias *and* RMSE, overall and within the flank-called subset | **not adopted, `trim=0` stays default** — RMSE flat at every trim depth in both populations; trim_10 cuts flank-called-subset bias ~32% but RMSE is unchanged (variance from fewer sites cancels it); see "Terminal sites are not trimmed by default" above |
 
 ### 6.5 Real data, three independent checks
@@ -847,11 +896,21 @@ commands, expected outputs, and notes.
 
 ## 7. Known limits — to be measured, not assumed
 
-- **Inner-boundary trimming.** Stage 3 anchors the two *outer* boundaries. The inner
-  boundaries have the same trimming tendency with no terminus to snap to, and the trimmed
-  bases are enriched for mismatches, so K2P may be biased slightly low. This will be
-  quantified. It will be corrected only if material, since the trimmed boundary is the
-  maximum-likelihood answer under the model.
+- **Inner-boundary error — quantified 2026-08-31, and it is not what was predicted.**
+  Measured on correctly-bounded gold records, the inner boundaries are called *too long*,
+  not trimmed: mean error +6.3 bp at `d=0.1` rising to +14.6 bp at `d=0.5`, MAE 3.9 to
+  16.5 bp, median 0 with a heavy right tail. The predicted downward K2P bias from trimmed,
+  mismatch-enriched bases is therefore the wrong sign — the mechanism is the opposite one,
+  the outer snap dragging its homologous partner (the *inner* end of the other LTR)
+  outward into the internal region.
+
+  Correcting it by re-deriving both inner boundaries from a single alignment anchored at
+  the settled outer ends was implemented and rejected on measurement (see Stage 3). The
+  informative part of that result: the correction leaves the pooled boundary error
+  unchanged to four significant figures, which means the residual is estimation error
+  under the model rather than a fixable artifact of how the inner ends are obtained. The
+  spec's original framing — "the trimmed boundary is the maximum-likelihood answer under
+  the model" — turns out to be the right one, for a reason the framing did not anticipate.
 - **Short flanks (<5 bp) are undetectable in principle** — indistinguishable from terminal
   divergence. This will be reported as a measured detection floor rather than papered over.
 - **AT-rich and low-complexity flanks** may invite over-extension. Composition-adjusted
