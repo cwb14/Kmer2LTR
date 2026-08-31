@@ -793,7 +793,23 @@ Every design element must earn its place:
    informative.
 3. **TSD detection** at called flanks — a second independent signal, same logic.
 
-**Task 16 ran all three** against the final defaults (T_BITS=10.0, MAX_EVALUE=1e-10;
+**Re-run 2026-08-31 against the new defaults** (divergence-aware `T_BITS`,
+per-element gap penalties; `bench/out/improve/`, job `20255338`, 256,776 records in
+00:11:50). Every dataset improved on both proxies, and every perfectly-bounded rate
+stayed above its raw-input-ends baseline: 5' `TG` at flank=0 rose 0.6462 -> 0.6661
+(arabidopsis, baseline 0.6052), 0.3182 -> 0.3272 (human, 0.2974), 0.7591 -> 0.7910
+(poa, 0.7240) and 0.8849 -> 0.9016 (MTEC, 0.3533); TSD enrichment over the
+shifted-10bp control at k=5 roughly doubled, 3.1x -> 8.4x on arabidopsis and
+5.8x -> 11.6x on human. Neither signal is used anywhere in `classify()`, so this is
+confirmation independent of both benchmark grids. Caveat recorded honestly: the `TG`
+rate at flank-CALLED boundaries also rose (arabidopsis 0.0815 -> 0.1236), narrowing the
+flank=0 : flank>0 ratio from 7.9x to 5.4x — more small flanks are called, and some sit
+at canonical boundaries. The row-count invariant holds exactly on all seven datasets,
+and `negatives.fa` false-`pass` is 5.14% against Task 16's 5.23% with the shuffled null
+still at exactly zero, confirming `MAX_EVALUE` was not disturbed. Full tables:
+`bench/out/memo_improve.md`.
+
+**Task 16 ran all three** against its own defaults (T_BITS=10.0, MAX_EVALUE=1e-10;
 `bench/out/real_*.tsv`, job `20201250`, 256,776 records across the seven datasets in
 00:05:06). Headline: on every genomic/putative-intact dataset (arabidopsis, poa, human,
 plus MTEC's maize library), boundaries the tool calls perfectly-bounded (`flank_len==0`)
