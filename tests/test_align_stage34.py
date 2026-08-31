@@ -232,3 +232,44 @@ def test_sg_qe_db_anchors_the_outer_ends_and_frees_the_inner_ones():
     rev = parasail.sg_de_striped_sat(q[:res.end_query + 1][::-1], r[::-1],
                                      go, ge, GENERIC_MATRIX)
     assert len(r) - 1 - rev.end_ref == 15    # ref begin recovered exactly
+
+
+# --------------------------------------------------------------------------- #
+# The parasail table lifetime footgun
+# --------------------------------------------------------------------------- #
+
+def test_score_table_read_matches_the_reported_score():
+    """`score_table` is a numpy VIEW onto memory the parasail result owns, and it
+    does not keep that result alive. Reading it off a temporary
+    (`np.asarray(f(...).score_table)`) is a use-after-free: silent garbage while
+    the freed pages happen to stay mapped, a segfault once the table is large
+    enough for the allocator to return them.
+
+    For `sg_de` the query is fully consumed, so the maximum of the table's LAST
+    ROW is exactly the reported score. That identity holds for a correctly-owned
+    table and fails for a dangling one, which is what makes it a usable guard.
+    """
+    import numpy as np
+    import parasail
+    from ltrk2p.scoring import GENERIC_MATRIX, SCALE
+    go, ge = 6 * SCALE, 2 * SCALE
+    q = _rnd(600, 900)
+    r = q[:300] + _rnd(1200, 901)
+    res = parasail.sg_de_table_striped_sat(q, r, go, ge, GENERIC_MATRIX)
+    tab = np.asarray(res.score_table)
+    assert tab.shape == (len(q), len(r))
+    assert int(tab[-1].max()) == res.score
+
+
+def test_graded_path_handles_a_large_table_without_crashing_or_garbage():
+    """The record that first exposed the lifetime bug allocated a 2000 x 4200
+    table. Garbage in that table makes the chosen endpoint effectively random, so
+    a sane flank call on a big, heavily diverged element is the observable
+    signature of a correctly-owned one."""
+    ltr = _rnd(700, 910)
+    S = (_rnd(500, 911) + _evolve(ltr, 0.25, 912) + _rnd(9000, 913)
+         + _evolve(ltr, 0.25, 914) + _rnd(500, 915))
+    r = classify("x", S, snap_mode="graded", t_bits=10.0)
+    assert r.status in ("pass", "weak_pair")
+    assert 0 <= r.flank5_len <= 500 and 0 <= r.flank3_len <= 500
+    assert r.ltr5_start <= r.ltr5_end < r.ltr3_start <= r.ltr3_end == r.seq_len - r.flank3_len

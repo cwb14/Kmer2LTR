@@ -241,13 +241,13 @@ def calibrate_full(S: str, spans, *, comp: str = "element",
     l5b, l5e, l3b, l3e = spans
     src = (S[l5b:l5e + 1] + S[l3b:l3e + 1]) if comp == "core" else S
     d_hat, kappa_hat, freqs = estimate_params(counts, src)
-    gaps = gaps_for_scheme(gap_scheme, a, b, counts)
     if counts.n_sites < MIN_CALIB_SITES:
-        # Degenerate core: keep the generic model rather than manufacturing a
-        # degenerate one from it.
+        # Degenerate core: keep the generic model whole rather than manufacturing
+        # a degenerate one from it. That includes the gap penalties -- an indel
+        # rate estimated from under 50 ungapped columns is noise.
         return Calib(GENERIC_MATRIX, d_hat, kappa_hat, gaps_for_scheme("legacy"))
     return Calib(parasail_matrix(logodds_bits(d_hat, kappa_hat, freqs)),
-                 d_hat, kappa_hat, gaps)
+                 d_hat, kappa_hat, gaps_for_scheme(gap_scheme, a, b, counts))
 
 
 def calibrate(S: str, hit, comp: str = "element"):
@@ -276,9 +276,9 @@ T_BITS = 10.0    # fixed fallback when no d_hat is available; benchmark-calibrat
 # Divergence-aware schedule: (exclusive upper bound on d_hat, t_bits).
 # A single constant is a poor fit because the false-flank rate at a FIXED
 # t_bits swings 40-80x across the observed d_hat range, so a threshold safe at
-# high divergence is needlessly strict at low divergence. Populated by the
-# sweep in bench/run_bench.py under an explicit, pre-registered detection
-# floor -- see docs/design.md, Stage 3.
+# high divergence is needlessly strict at low divergence. Derived by
+# bench/derive_schedule.py under a rule committed before the sweep it consumes
+# was run -- see docs/design.md, Stage 3.
 T_BITS_SCHEDULE: tuple[tuple[float, float], ...] = (
     (0.025, 5.0),
     (0.075, 8.0),
@@ -357,8 +357,17 @@ def _extend(outer: str, inner: str, matrix, gaps: Gaps, t_bits: float,
     # the original outer length, is what keeps that bound real.
     q = outer[:EXT_CAP]
     r = inner[:2 * len(q) + EXT_REF_SLACK]
-    tab = np.asarray(parasail.sg_de_table_striped_sat(
-        q, r, gaps.open, gaps.extend, matrix).score_table)
+    # `res` MUST stay referenced for as long as `tab` is read. parasail's
+    # `score_table` is a numpy view onto memory owned by the result object, and
+    # it does not keep that object alive -- so
+    #     tab = np.asarray(parasail.sg_de_table_...(...).score_table)
+    # is a use-after-free. It fails silently for small tables (the freed pages
+    # are still mapped, so the read returns plausible-looking garbage) and
+    # segfaults once the table is big enough for the allocator to hand the pages
+    # back: measured at q=2000 x r=4200 on
+    # arabidopsis__LR999453.1:20940665-20952438#LTR/Gypsy/Retand__d0.5__f500.
+    res = parasail.sg_de_table_striped_sat(q, r, gaps.open, gaps.extend, matrix)
+    tab = np.asarray(res.score_table)
     H = tab.max(axis=1)
     ok = np.nonzero(H > -t_bits * SCALE)[0]
     if not len(ok):

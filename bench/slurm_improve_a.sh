@@ -28,7 +28,7 @@ $PY bench/run_improve.py \
     --gold-fa bench/out/gold_perturbed.fa --gold-truth bench/out/gold_truth.tsv \
     --hom-fa bench/out/homology_grid.fa --hom-truth bench/out/homology_truth.tsv \
     --dhat-for baseline \
-    --configs baseline,stage4_rerun,keep_weak,graded,inner_joint,comp_core,gaps_static,gaps_adaptive,schedule \
+    --configs inner_joint,comp_core,gaps_static,gaps_adaptive,schedule \
     --tbits-sweep 2,5,8,10,15,20,30 --sweep-base baseline
 
 echo "=== Job A complete: $(date) ==="

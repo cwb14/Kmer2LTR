@@ -160,18 +160,29 @@ def main(argv=None) -> int:
                 _milestone(f"d_hat [{label}]: {n} records in {time.time() - t0:.0f}s")
             dhat_paths[label] = path
 
+    # One config dying must not take the campaign with it: a crash in an
+    # experimental configuration is a result about that configuration, not a
+    # reason to lose the eight that already ran.
     for name in [c for c in args.configs.split(",") if c.strip()]:
-        summaries.append(run_config(name, outdir, args.threads, gold_fa,
-                                    args.gold_truth, args.hom_fa, args.hom_truth,
-                                    gold_dhat=dhat_paths["gold"],
-                                    hom_dhat=dhat_paths["hom"]))
+        try:
+            summaries.append(run_config(name, outdir, args.threads, gold_fa,
+                                        args.gold_truth, args.hom_fa, args.hom_truth,
+                                        gold_dhat=dhat_paths["gold"],
+                                        hom_dhat=dhat_paths["hom"]))
+        except Exception as exc:                       # noqa: BLE001
+            _milestone(f"CONFIG FAILED {name}: {type(exc).__name__}: {exc}")
+            summaries.append({"config": name, "error": f"{type(exc).__name__}: {exc}"})
 
     for tb in [float(x) for x in args.tbits_sweep.split(",") if x.strip()]:
-        summaries.append(run_config(
-            args.sweep_base, outdir, args.threads, gold_fa, args.gold_truth,
-            args.hom_fa, args.hom_truth, extra={"t_bits": tb},
-            tag=f"{args.sweep_base}_t{tb:g}",
-            gold_dhat=dhat_paths["gold"], hom_dhat=dhat_paths["hom"]))
+        tag = f"{args.sweep_base}_t{tb:g}"
+        try:
+            summaries.append(run_config(
+                args.sweep_base, outdir, args.threads, gold_fa, args.gold_truth,
+                args.hom_fa, args.hom_truth, extra={"t_bits": tb}, tag=tag,
+                gold_dhat=dhat_paths["gold"], hom_dhat=dhat_paths["hom"]))
+        except Exception as exc:                       # noqa: BLE001
+            _milestone(f"SWEEP POINT FAILED {tag}: {type(exc).__name__}: {exc}")
+            summaries.append({"config": tag, "error": f"{type(exc).__name__}: {exc}"})
 
     if summaries:
         path = outdir / f"summary_{int(time.time())}.json"
