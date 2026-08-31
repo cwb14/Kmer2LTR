@@ -127,12 +127,12 @@ def main(argv=None) -> int:
     ap.add_argument("--configs", required=True)
     ap.add_argument("--source", default="lib")
     ap.add_argument("--per-d", action="store_true", help="also break the gold grid out by d")
-    ap.add_argument("--only", default="", help="restrict to these table names: hom,indel,byp,gold")
+    ap.add_argument("--only", default="", help="restrict to these table names: hom,indel,byp,byindel,gold")
     args = ap.parse_args(argv)
     outdir = Path(args.outdir)
     names = [c for c in args.configs.split(",") if c.strip()]
 
-    hom_rows, gold_rows, sub_rows, ind_rows, gd_rows = [], [], [], [], []
+    hom_rows, gold_rows, sub_rows, ind_rows, gd_rows, ir_rows = [], [], [], [], [], []
     for name in names:
         hp = outdir / f"cells_hom_{name}.json"
         if hp.exists():
@@ -142,6 +142,9 @@ def main(argv=None) -> int:
             for p in (0.0, 0.10, 0.20, 0.30, 0.35):
                 sub_rows.append({"config": f"{name} p={p:g}",
                                  **hom_summary(cells, args.source, "subs", p=p)})
+            for ir in (0.001, 0.002, 0.005, 0.01, 0.02, 0.05):
+                ir_rows.append({"config": f"{name} indel={ir:g}",
+                                **hom_summary(cells, args.source, "indel", indel=ir)})
         gp = outdir / f"cells_gold_{name}.json"
         if gp.exists():
             gc = gold_cells_from_json(gp)
@@ -160,6 +163,9 @@ def main(argv=None) -> int:
     if sub_rows and want("byp"):
         _table("Homology grid, substitution panel, by mutation level",
                sub_rows, _HOM_COLS)
+    if ir_rows and want("byindel"):
+        _table("Homology grid, indel panel, by indel rate per site per branch",
+               ir_rows, _HOM_COLS)
     if gold_rows and want("gold"):
         _table("Gold perturbed grid (pooled over d and flank)", gold_rows, _GOLD_COLS)
     if gd_rows and args.per_d:

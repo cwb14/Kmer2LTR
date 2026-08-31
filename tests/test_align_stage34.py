@@ -207,3 +207,28 @@ def test_stage4_still_refuses_to_invent_a_pair_from_unrelated_flanks():
                 if outermost(S, b0, m).spans != b0.spans:
                     spurious += 1
     assert spurious == 0, f"invented an outer pair on {spurious}/{trials}"
+
+
+# --------------------------------------------------------------------------- #
+# The parasail semantics the inner refinement depends on
+# --------------------------------------------------------------------------- #
+
+def test_sg_qe_db_anchors_the_outer_ends_and_frees_the_inner_ones():
+    """`_joint_inner` is only correct if sg_qe_db means "query begin and ref end
+    anchored, query end and ref begin free", and if a reversed sg_de pass
+    recovers the ref begin. Both are verified here rather than assumed, because
+    parasail's flag names describe free GAPS, not free ends, and the two read
+    the same until they disagree."""
+    import parasail
+    from ltrk2p.scoring import GENERIC_MATRIX, SCALE
+    go, ge = 6 * SCALE, 2 * SCALE
+    core = "ACGTACGTACGTACGTACGT"          # 20 bp shared repeat
+    q = core + "T" * 15                     # repeat at the query's START
+    r = "G" * 15 + core                     # repeat at the ref's END
+    res = parasail.sg_qe_db_striped_sat(q, r, go, ge, GENERIC_MATRIX)
+    assert res.score == 20 * SCALE          # all 20 matches, nothing else paid for
+    assert res.end_query == 19               # query end free: stops after the repeat
+    assert res.end_ref == len(r) - 1         # ref end anchored
+    rev = parasail.sg_de_striped_sat(q[:res.end_query + 1][::-1], r[::-1],
+                                     go, ge, GENERIC_MATRIX)
+    assert len(r) - 1 - rev.end_ref == 15    # ref begin recovered exactly
