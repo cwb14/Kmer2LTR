@@ -30,9 +30,10 @@ Reference throughout is the shipped flat `t_bits = 10`.
        the pair-loss rate has risen by at most 2 points
    Raising `t_bits` costs pairs outright as well as flank calls -- Task 14 saw
    `n_pass` fall at high divergence -- so pair loss is a constrained quantity,
-   not a free one. Admissibility must hold on BOTH grids: the gold grid for
-   continuity with every prior measurement, and the homology grid because it is
-   the one that owes nothing to a motif prior or to the tool's own selection.
+   not a free one. Admissibility must hold on both grids wherever both have
+   evidence (see step 5): the gold grid for continuity with every prior
+   measurement, and the homology grid because it is the one that owes nothing to
+   a motif prior or to the tool's own selection.
 
 3. `t*(b)` = the SMALLEST admissible `t` whose false-flank rate in bin `b` is at
    or below `FF_TARGET`. If no admissible `t` reaches the target, take the
