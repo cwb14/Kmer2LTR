@@ -18,7 +18,11 @@ def _fmt(v) -> str:
     if v is None:
         return "NA"
     if isinstance(v, float):
-        return f"{v:.6g}"
+        # `+ 0.0` normalises negative zero. K2P of an identical pair evaluates to
+        # -0.5*log(1) - 0.25*log(1) == -0.0, which formats as the string "-0" --
+        # numerically equal to zero but a needless surprise in a data column
+        # (1,767 of 10,307 arabidopsis rows in the Task 16 run).
+        return f"{v + 0.0:.6g}"
     return str(v)
 
 

@@ -24,8 +24,10 @@ def _parser() -> argparse.ArgumentParser:
                    help="skip records already present in the output and append")
     p.add_argument("-v", "--verbose", action="store_true", help="per-step progress")
     adv = p.add_argument_group("advanced (benchmark-calibrated defaults)")
-    adv.add_argument("--flank-bits", type=float, default=align.T_BITS,
-                     help="evidence in bits required to call a flank (default: %(default)s)")
+    adv.add_argument("--flank-bits", type=float, default=None,
+                     help="pin the evidence in bits required to call a flank; "
+                          "default is a divergence-aware schedule keyed on the "
+                          "element's own estimated divergence")
     adv.add_argument("--min-bitscore", type=float, default=None,
                      help="minimum alignment bit score to report a pair")
     adv.add_argument("--max-window", type=int, default=None,
@@ -46,7 +48,9 @@ def main(argv: list[str] | None = None) -> int:
 
     # Thread tuning values explicitly. Assigning align.T_BITS / align.W0 would
     # be a silent no-op: both are already bound as default arguments at def time.
-    classify_kw = {"t_bits": args.flank_bits}
+    classify_kw = {}
+    if args.flank_bits is not None:
+        classify_kw["t_bits"] = args.flank_bits
     if args.max_window is not None:
         classify_kw["w0"] = args.max_window
     if args.min_bitscore is not None:

@@ -16,4 +16,4 @@ ltrk2p = "ltrk2p.cli:main"
 where = ["src"]
 
 [tool.pytest.ini_options]
-pythonpath = ["."]
+pythonpath = [".", "src"]

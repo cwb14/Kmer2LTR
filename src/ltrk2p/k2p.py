@@ -74,3 +74,25 @@ def k2p_distance(c: SubstCounts) -> tuple[float | None, float | None]:
     b = 0.5 * (1.0 / w1 + 1.0 / w2)
     var = (a * a * P + b * b * Q - (a * P + b * Q) ** 2) / n
     return d, math.sqrt(var) if var > 0 else 0.0
+
+
+def count_gap_runs(a: str, b: str) -> int:
+    """Number of gap OPENINGS across two equal-length gapped aligned strings.
+
+    A run of consecutive gap columns in the same sequence counts once, which is
+    what an affine model charges `gap_open` for. Needed to estimate an indel
+    rate (openings per site) separately from an indel length (columns per
+    opening); `SubstCounts.n_gapcols` conflates the two.
+    """
+    if len(a) != len(b):
+        raise ValueError(f"aligned strings differ in length: {len(a)} vs {len(b)}")
+    runs = 0
+    in_a = in_b = False
+    for x, y in zip(a, b):
+        ga, gb = x == "-", y == "-"
+        if ga and not in_a:
+            runs += 1
+        if gb and not in_b:
+            runs += 1
+        in_a, in_b = ga, gb
+    return runs
