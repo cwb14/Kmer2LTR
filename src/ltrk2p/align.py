@@ -275,16 +275,25 @@ T_BITS = 10.0    # fixed fallback when no d_hat is available; benchmark-calibrat
 
 # Divergence-aware schedule: (exclusive upper bound on d_hat, t_bits).
 # A single constant is a poor fit because the false-flank rate at a FIXED
-# t_bits swings 40-80x across the observed d_hat range, so a threshold safe at
-# high divergence is needlessly strict at low divergence. Derived by
-# bench/derive_schedule.py under a rule committed before the sweep it consumes
-# was run -- see docs/design.md, Stage 3.
+# t_bits swings across the observed d_hat range while t_bits does not. Derived
+# by bench/derive_schedule.py under a rule committed BEFORE the sweep it
+# consumes was run (5ac6c89), and applied by bench/apply_schedule.py so the
+# shipped constant is provably what that rule produced.
+#
+# The shape is the opposite of what Task 14's illustrative schedules suggested:
+# it RELAXES the threshold at low divergence rather than tightening it at high,
+# because the detection floor ruled t=15 and t=20 inadmissible in every bin. In
+# the d_hat<0.025 bin -- near-identical LTR copies, so an unambiguous boundary --
+# t=2 lifts 5bp flank detection from 83.7% to 98.9% for 1.5 points of
+# false-flank rate. Against a flat threshold re-tuned to the SAME pooled
+# false-flank rate the schedule is worth +3.7 points of det@10 on the gold grid
+# and +2.6 of det@5 on the homology grid, at -0.0 to -1.4 points on every larger
+# flank: a real but modest Pareto gain, much smaller than Task 14 projected --
+# see docs/.../2026-08-28-ltrk2p-design.md, Stage 3, for why.
 T_BITS_SCHEDULE: tuple[tuple[float, float], ...] = (
-    (0.025, 5.0),
-    (0.075, 8.0),
-    (0.250, 10.0),
-    (0.450, 15.0),
-    (float("inf"), 20.0),
+    (0.025, 2),
+    (0.15, 8),
+    (float("inf"), 10),
 )
 
 
@@ -598,7 +607,7 @@ def classify(seq_id: str, S: str, *, cs: bool = False, t_bits: float | None = No
              use_stage3: bool = True, use_stage4: bool = True,
              trim: int = 0, refine: str = "wfa",
              snap_mode: str = "binary", inner: str = "none",
-             comp: str = "element", gap_scheme: str = "legacy",
+             comp: str = "element", gap_scheme: str = "adaptive",
              keep_weak: bool = True, stage4_recal: bool = True) -> Result:
     """Locate the LTR pair and measure its divergence.
 
