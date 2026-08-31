@@ -146,6 +146,15 @@ Three consequences, each load-bearing:
 3. Composition adjustment via `f_x · f_y` down-weights matches in AT-rich context, which is
    the principal defence against over-extension into AT-rich flanking DNA.
 
+**The composition is the whole element's, not the LTR core's.** Estimating it from
+the core alone was measured (2026-08-31) and is worse on every panel of both
+benchmark grids: on the homology grid's substitution panel it moves boundary MAE
+3.29 → 3.79, 25 bp flank detection 79.2% → 74.1% and the false-flank rate 0.20% →
+0.41%. Consequence 3 above is why: the denominator is the *null* a match is being
+judged against, and the null for "does homology continue past this boundary?" is
+the surrounding sequence, not the repeat itself. The whole element — internal
+region included — is the better proxy for that.
+
 Re-run Stage 1 once with the calibrated matrix. This self-tuning is what delivers "zero
 customization": the scoring adapts per element instead of the user tuning it.
 
@@ -157,9 +166,29 @@ magnitudes on a large window can exceed int16, so the `_sat` parasail variants a
 throughout — they escalate 8 -> 16 -> 32 bit automatically on saturation rather than
 silently overflowing.
 
+**Gap penalties are calibrated too (2026-08-31).** Stage 2 has always been specified
+as estimating an indel rate, and the shipped code never used one: gaps were fixed at
+6 bits to open and 2 bits to extend everywhere. Under a geometric indel-length model
+the log-odds cost of a gap of length `k` is `-log2(mu) - (k-1)*log2(P_continue)`, which
+is exactly parasail's affine form — so `open = -log2(mu)` with `mu` the per-column
+probability that a gap opens, and `extend = -log2(1 - 1/mean_length)`, both read off
+the same core alignment the matrix comes from. Clamped to 4-16 bits and 0.25-3 bits
+respectively: a core with no gaps at all implies an infinite opening cost, and a core
+with one long gap an infinite mean.
+
+The measured effect is not second-order. Against the fixed 6/2 scheme, on the
+homology grid's substitution panel, per-element gaps move flank detection at 5 bp
+from 7.9% to 23.5% and at 25 bp from 79.2% to 91.1%, boundary MAE from 3.29 to
+2.60, and pair loss from 2.16% to 1.95%; on the indel panel they cut K2P RMSE by
+35% and K2P bias by 52%. A fixed 10/1 scheme captures part of the same gain but
+is beaten by the per-element estimate on every metric of the real-composition
+panel.
+
 **Fallback.** If the Stage 1 core is too short or too diverged to estimate `p̂` stably
-(fewer than 50 ungapped sites), calibration is skipped and the generic +1/-1 matrix is
-retained. This keeps a degenerate element from producing a degenerate scoring matrix.
+(fewer than 50 ungapped sites), calibration is skipped and the generic model is
+retained **whole** — matrix and gap penalties both. An indel rate estimated from under
+50 ungapped columns is noise, and adopting it while rejecting the matrix derived from
+the same counts would be incoherent.
 
 ### Stage 2b — significance
 
@@ -174,7 +203,13 @@ E = K * m * n * 2^(-S')
 with `m`, `n` the two window lengths and `K` a constant for the matrix. A pair is reported
 as `status = pass` only if `E` is below threshold; otherwise `status = no_pair`.
 
-**Significance is always scored with the generic matrix, never the calibrated one.** The two
+**Significance is always scored with the generic model, never the calibrated one
+— and the generic model now means the generic matrix _and_ a fixed pair of gap
+penalties (`SIG_GAPS`, 6 bits open / 2 bits extend).** Pinning the gap penalties
+alongside the matrix is what allows the *alignment* gap penalties to change
+(section 3, Stage 2) without moving `MAX_EVALUE` underneath them: the final
+significance score is `nw(q, r, SIG_GAPS, GENERIC_MATRIX)` regardless of how the
+element itself was aligned. The two
 are on different score scales — at low divergence the calibrated matrix scores a match at
 `+8` in SCALE units where the generic matrix scores `+4` — so a fixed E-value threshold
 calibrated against one is invalid against the other. Applying the generic-calibrated
@@ -284,6 +319,18 @@ not just a false-flank target, or it overcorrects exactly where catching overext
 matters most (see `task-14-report.md`, "Does a divergence-aware threshold help?"). Recorded
 here as future work, deliberately deferred.
 
+**Stage 3 takes its extension regions from the internal region, not the discovery
+window (2026-08-31).** The partner region for the 5' test used to be
+`S[wstart:l3b]` — the part of the *suffix window* lying before the 3' LTR. That
+had two degeneracies: it is empty whenever the hit begins exactly at the window's
+inner edge, so the snap could never fire; and it overlaps the 5' LTR itself
+whenever the window starts before `ltr5_end`. Bounding it by the internal region
+instead removes both, and — decisively — removes `w` from this stage, which is
+what makes Stage 3 re-runnable after Stage 4, where no window exists. Measured
+old-code-vs-new-code at identical settings on a 20,068-record stratified sample:
+99.20% of records identical, false-flank rate 7.36% → 6.30%, every detection rate
+within half a point, flank-length MAE better at three of four flank sizes.
+
 The fix is to ask directly whether homology reaches each terminus, as an exact model
 comparison rather than a greedy endpoint:
 
@@ -308,11 +355,57 @@ to skip a lead-in.
 Each extension alignment is optimal given a fixed core. The approximation is that the core
 alignment itself does not shift; this is validated by ablation.
 
+#### Two alternatives to the binary snap, measured and rejected (2026-08-31)
+
+**A scored/graded extension**, replacing the binary snap with "extend to the
+furthest endpoint whose running score is still above the noise floor". The
+literal version of this idea — take the extension's *optimal* endpoint — is
+provably a no-op: discovery's core is the Smith-Waterman optimum over the same
+windows, so a positive-scoring outward extension would contradict that
+optimality. Confirmed empirically at `H.max() > 0` in 0 of 1,194 records. The
+non-trivial version, thresholding at `-T` instead, is measurably worse: on the
+homology grid it moves `bnd_mae` 3.29 → 8.81, `flank_mae` 4.70 → 12.63, K2P bias
++0.0006 → +0.0168 and pair loss 2.2% → 3.9%, for a false-flank rate that does not
+move at all. The mechanism is that a `T`-bit budget spent on the snap decision
+and *again* on the endpoint lets the boundary creep `T / (bits per base)` bases
+into non-homologous sequence — on a control element with 8,000 bp of random flank
+it calls 7,994.
+
+**Joint inner boundaries.** Section 7 notes that the two inner boundaries are
+by-products of the opposite terminus's snap. Re-deriving both from a single
+alignment anchored at the settled outer ends (`sg_qe_db`, plus a reversed `sg_de`
+for the ref begin) changes 418 of 62,644 located records — so it is a real
+alternative, not a no-op — but it is right more often than wrong (276 vs 140) by
+*less* than it is wrong by: mean summed inner error on the records it touches
+242 → 557, pooled `bnd_mae` 3.287 → 3.286. Rejected.
+
+The second result is the more informative one: the inner-boundary error that
+motivated the idea is **not** a fixable artifact of the inner ends being
+unexamined. Deriving them jointly and optimally leaves the pooled error unchanged
+to four significant figures, which means the residual is estimation error under
+the model, not a greedy-trimming bug.
+
 ### Stage 4 — outermost pair
 
 If a flank is still called after Stage 3, search strictly outside it — `S[0:ltr5_start]`
 against `S[ltr3_end:L]` — for a pair significant by the Stage 2b criterion. If one exists,
 it wins, and Stages 2-3 are re-run on it.
+
+**The re-run was specified here from the beginning and was missing from the code
+until 2026-08-31.** `outermost` returned the raw Smith-Waterman ends of the outer
+pair and `classify` used them directly, so the recovered outer element was the
+one pair in the tool whose termini were never tested — precisely the pair most
+likely to need it, since it is older and therefore more diverged than the nested
+pair that displaced it, and raw SW trims a terminus exactly when the terminal
+bases are diverged. The re-run recalibrates on the outer pair (its divergence is
+not the inner pair's, so neither the inner pair's matrix nor its gap penalties
+describe it), re-runs the outer search under that calibrated matrix, and then
+applies Stage 3. The acceptance gate is untouched and still generic-scored, so
+no new pair can be admitted by the change.
+
+Making this possible required removing the discovery window from Stage 3 — see
+the Stage 3 section — because after Stage 4 there is no window to bound the
+extension regions with.
 
 This is what makes a retained (un-excised) nested element report the outer element's LTRs
 rather than the nested element's, which are typically younger and would otherwise score
@@ -466,10 +559,32 @@ minimap2-style short `cs` string.
 mean the call was unambiguous; values near zero mark elements whose boundaries sit at the
 detection floor and which a cautious downstream analysis may wish to exclude.
 
-`status` values: `pass`, `no_pair`, `too_short`, `all_ambiguous`, `k2p_undefined`.
+`status` values: `pass`, `weak_pair`, `no_pair`, `too_short`, `all_ambiguous`,
+`k2p_undefined`.
 
 `no_pair`, `too_short` and `all_ambiguous` rows carry `NA` in every data column — no LTR
 pair was located, so there is nothing to report.
+
+**`weak_pair` is the significance gate declining to destroy a measurement.** A pair was
+located, its boundaries settled and its divergence measured, and only then did the
+E-value (or an explicit `--min-bitscore`) fall short. Nulling all twenty data columns at
+that point discards work that is correct and useful — coordinates, substitution counts,
+identity, K2P — to record a single bit of information. `weak_pair` records that bit in
+`status` and reports everything else, exactly as `k2p_undefined` already does for
+saturation.
+
+`status == "pass"` keeps its meaning unchanged, so the TSV remains a clean
+intact-LTR-RT filter and no downstream `pass` filter shifts. What changes is that
+`grep -v pass` is no longer a synonym for "nothing was found here". The cost is zero
+runtime: the gate already sat *after* Stages 3-5, so the work was being done and then
+thrown away.
+
+Verified on the 70,000-record homology grid: of 62,648 records the old gate accepted,
+**zero** have a single differing field under the new one, while 1,386 records it had
+nulled are now reported as `weak_pair`. The change adds rows; it moves no boundary.
+
+Where a pair is both insignificant and saturated, `weak_pair` wins — the significance
+failure is the more fundamental statement, and `k2p`/`k2p_se` are `NA` either way.
 
 **`k2p_undefined` is deliberately different**: it means the pair *was* located and its
 boundaries are valid, but the divergence is saturated so the K2P correction has no defined
@@ -557,6 +672,45 @@ Truth is recorded two ways, and the distinction matters:
 Comparing against realized K2P isolates *tool* error. Comparing against nominal d measures
 the K2P estimator itself, which is a separate and already-known quantity. Reporting both
 keeps them from being confounded, which is the usual way this kind of benchmark misleads.
+
+### 6.2b Homology-only grid (added 2026-08-31)
+
+Sections 6.1-6.2 build elements from library consensus; section 6.5's gold-subset
+benchmark perturbs *real* elements but selects them with `select_gold`, which filters on
+the tool's own output **and** requires canonical `TG`..`CA` termini. Both filters are
+deliberate there and both are disqualifying for one specific question: *how well are
+boundaries recovered from homology alone?* The first makes the answer circular; the
+second smuggles in a structural prior the tool itself declines to use.
+
+`bench/homology_grid.py` answers that question with neither. Its elements come straight
+from `truth.fa`'s `X-LTR` + `X-I` + `X-LTR` constructions, which are **perfect by
+construction** — the two LTR copies are literally the same string, so divergence is
+exactly zero and boundaries exactly known — and are selected on length alone: no motif,
+no TSD, no call by ltrk2p.
+
+Three perturbation axes on those perfect elements:
+
+- **substitutions**, parameterised by the *target pairwise p-distance*
+  {0, 5, 10, 15, 20, 25, 30, 35}% rather than by a branch length, so "add 25% mutations"
+  means 25% of sites differ between the copies. `d_for_p` inverts
+  `1 − p_same(d, κ) = p_target` by bisection and records the implied K2P distance.
+- **flanks** of {0, 5, 25, 45, 65} bp, drawn from a composition-matched shuffle of the
+  element's own sequence, so no detector can succeed by noticing a compositional step.
+- **indels**, swept independently of substitutions at
+  {0.001, 0.002, 0.005, 0.01, 0.02, 0.05} events per site per branch, geometric lengths.
+
+**The true alignment is tracked through evolution.** `evolve_tracked` returns a per-base
+ancestral trace alongside each descendant; `true_alignment` merges two traces into the
+exact pairwise alignment. `realized_p` and `realized_k2p` are therefore measurements, not
+approximations, even under indels. This is the one thing the older simulator cannot do:
+`bench/simulate.py` computes `realized_k2p` by truncate-and-compare on unaligned strings,
+which Task 14 found disagrees materially with a proper alignment even at `indel_frac=0`
+and is simply wrong once indels are switched on. `simulate.py` is unchanged and still
+carries that flaw; nothing measured on this grid depends on it.
+
+Two panels are reported separately: `lib` (library constructions — the non-circular one,
+and the deciding evidence) and `real` (motif-free Arabidopsis elements — real composition
+and real internal structure, but still selected from a prediction TSV).
 
 ### 6.3 Metrics
 

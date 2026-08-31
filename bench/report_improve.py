@@ -175,3 +175,22 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+def roc_points(outdir, base, ts, grid="gold"):
+    """(false-flank rate, detection at each flank size) for one config across a
+    t_bits sweep -- the curve a change has to beat at MATCHED false-flank rate
+    before it can be called an improvement rather than a re-tuning."""
+    out = []
+    for t in ts:
+        tag = f"{base}_t{t:g}" if t is not None else base
+        path = Path(outdir) / f"cells_{'gold' if grid == 'gold' else 'hom'}_{tag}.json"
+        if not path.exists():
+            continue
+        if grid == "gold":
+            row = gold_summary(gold_cells_from_json(path))
+        else:
+            row = hom_summary(hom_cells_from_json(path)["by_p"], "lib", "subs")
+        row["t"] = t
+        out.append(row)
+    return sorted(out, key=lambda r: r["ff_rate"])

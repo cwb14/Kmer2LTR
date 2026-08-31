@@ -50,6 +50,9 @@ CONFIGS: dict[str, dict] = {
     "gaps_static": dict(gap_scheme="static"),     # item 7a
     "gaps_adaptive": dict(gap_scheme="adaptive"),  # item 7b
     "schedule": dict(t_bits=None),                # item 1
+    # The pipeline carried forward: the two directed items plus the gap scheme,
+    # still at a FIXED t_bits so the sweep below can re-tune it honestly.
+    "candidate": dict(stage4_recal=True, keep_weak=True, gap_scheme="adaptive"),
 }
 
 
