@@ -1,6 +1,6 @@
 # ltrk2p — LTR boundary classification and K2P divergence
 
-**Date:** 2026-08-28 (revised 2026-08-31)
+**Date:** 2026-08-28
 **Status:** implemented; defaults set from benchmark evidence
 
 ## 1. Purpose
@@ -44,9 +44,35 @@ A perfectly bounded element therefore reports `ltr5_start = 1` and
 
 Note that input headers sometimes carry genomic coordinates whose span disagrees with the
 sequence length (nested-processed outer elements, whose inner insertion was excised while
-the header retained the original genomic interval). Headers are treated as opaque
-identifiers and are never parsed for coordinates. All output coordinates are offsets into
-the supplied sequence.
+the header retained the original genomic interval). **In the TSV, headers are treated as
+opaque identifiers and are never parsed for coordinates.** All output coordinates are
+offsets into the supplied sequence.
+
+The single exception is `--trim-flanks`, which exists to hand the input back corrected and
+so must correct the header too. It parses `chrom:start-end` (`..` accepted for `-`) in
+either of the two placements the common producers emit — `chr1:1000-2000#LTR/Gypsy`, and
+`bedtools getfasta -name`'s `TE_1#LTR/Copia::chr1:1000-2000`, where the `#` sits in the
+middle and the locus is past it — and shifts each end inwards by the called flank length.
+Both are needed: a header left unchanged over a sequence that *was* trimmed is a header
+that lies about its own span. It is otherwise deliberately strict: a header that matches
+neither shape exactly — including an ambiguous three-part range — is emitted unchanged
+rather than guessed at, and no TSV column is affected either way.
+
+**Optional outputs.** Beyond the TSV, and all off by default, all named after `-o`:
+boundary-corrected elements, IUPAC consensus LTRs and their mmseqs clustering, the same
+over internal regions, "perfect" (pre-divergence) elements, and a K2P density figure. Every one of them takes `status == "pass"` records only. They do not change the
+TSV — byte for byte, a run with them produces the same table as a run without — and
+`--resume` is refused alongside them, because the table resumes on its data-line count
+while these files hold only the passing subset.
+
+**Nothing is opened for writing until every destination has been checked.** All of these
+paths are derived from `-o`, so one of them can name the input — `elements.trimmed.fa` fed
+back in with `-o elements.tsv` derives `elements.trimmed.fa` again. Opening truncates, so
+the run would empty the file it was about to read, report zero records, and then delete the
+emptied stream as one that "received no records". The destinations are therefore resolved
+and compared against the input in `_validate`, before any handle exists. For the same
+reason a stream that received nothing is removed on close only if this run CREATED it: a
+file that was already there is truncated, never deleted.
 
 ## 3. Algorithm
 
@@ -147,7 +173,7 @@ Three consequences, each load-bearing:
    the principal defence against over-extension into AT-rich flanking DNA.
 
 **The composition is the whole element's, not the LTR core's.** Estimating it from
-the core alone was measured (2026-08-31) and is worse on every panel of both
+the core alone was measured and is worse on every panel of both
 benchmark grids: on the homology grid's substitution panel it moves boundary MAE
 3.29 → 3.79, 25 bp flank detection 79.2% → 74.1% and the false-flank rate 0.20% →
 0.41%. Consequence 3 above is why: the denominator is the *null* a match is being
@@ -166,7 +192,7 @@ magnitudes on a large window can exceed int16, so the `_sat` parasail variants a
 throughout — they escalate 8 -> 16 -> 32 bit automatically on saturation rather than
 silently overflowing.
 
-**Gap penalties are calibrated too (2026-08-31).** Stage 2 has always been specified
+**Gap penalties are calibrated too .** Stage 2 has always been specified
 as estimating an indel rate, and the shipped code never used one: gaps were fixed at
 6 bits to open and 2 bits to extend everywhere. Under a geometric indel-length model
 the log-odds cost of a gap of length `k` is `-log2(mu) - (k-1)*log2(P_continue)`, which
@@ -283,15 +309,14 @@ and 50 bp or larger essentially always, with called length accurate to under a b
 at t=0, 3.8% at t=5, 0% at t=10 but with true-flank detection falling to 83.8%, and at
 t=25 the degenerate 0%/0% regime where no flank is ever called.
 
-**Task 16 update — `T_BITS` raised to 10.0, on real data, not the synthetic sweep above.**
-The synthetic calibration above under-stated the false-flank problem badly: Task 14 swept
-`t_bits in {2,5,8,10,15,20,30}` over 260,876 records built by perturbing 1,694 REAL gold
-elements (arabidopsis + human + library-consensus truth.fa) with known added flank length —
-`bench/out/gold_perturbed.fa`/`gold_truth.tsv`, scored per-cell in
-`bench/out/cells_tbits_*.json`, full sweep table in `bench/out/memo_bench.md` and
-`bench/out/memo_bench.md`. On that real-sequence grid, the
-shipped default of 5.0 gave a false-flank rate of **26.8% at d=0.3** (42.6% at d=0.4) — a
-~20x gap from what synthetic-only calibration suggested. At `t_bits=10`:
+**`T_BITS` is set on real data, not on the synthetic sweep above.** That synthetic
+calibration under-stated the false-flank problem badly. Sweeping
+`t_bits in {2,5,8,10,15,20,30}` over 260,876 records built by perturbing 1,694 real gold
+elements (arabidopsis + human + library-consensus truth.fa) with known added flank length
+(`bench/out/gold_perturbed.fa`/`gold_truth.tsv`, scored per-cell into
+`bench/out/cells_tbits_*.json`) shows that on real sequence a threshold of 5.0 gives a
+false-flank rate of **26.8% at d=0.3** (42.6% at d=0.4) — a ~20x gap from what
+synthetic-only calibration suggested. At `t_bits=10`:
 
 | d | false-flank @ t=5 | false-flank @ t=10 |
 |---|---|---|
@@ -305,17 +330,15 @@ a 2.5-3.6x reduction across the range, while large-flank detection — the pract
 important failure mode, catching genuine overextension — is nearly unchanged: det@50 falls
 93.0% -> 91.3% (1.7 points) and det@100 barely moves, 91.7% -> 91.6%. The cost concentrates
 entirely on 10-20 bp flanks (det@10 75.5% -> 39.4%, det@20 88.8% -> 70.5%), which section 7
-already documents as sitting near the theoretical detection floor. **`T_BITS = 10.0` is now
-the shipped default** (`src/ltrk2p/align.py`); `--flank-bits` follows it automatically.
+already documents as sitting near the theoretical detection floor. **`T_BITS = 10.0` is the fixed fallback** (`src/ltrk2p/align.py`), used whenever no
+per-element divergence estimate is available; `--flank-bits` pins it.
 
-**Task 14's sweep was measured at `MAX_EVALUE = 1e-3`, and `T_BITS = 10` shipped
-alongside `MAX_EVALUE = 1e-10`.** Discovered 2026-08-31 and verified directly: records
-that `bench/out/gold_pred_tbits_10.tsv` reports as `pass` are `no_pair` under the same
-pre-campaign code at 1e-10 and `pass` at 1e-3. Every number in the Task 14 block above
-therefore describes a significance regime that was never shipped. The sweep has been
-re-run at 1e-10; the re-measured reference curve is in `bench/out/memo_improve.md`.
-`T_BITS = 10` remains the fixed fallback — the re-measured curve does not overturn it —
-but the numbers supporting it are the new ones, not those above.
+**Caution on the sweep above: it was measured at `MAX_EVALUE = 1e-3`,** while the tool
+ships `MAX_EVALUE = 1e-10`. Verified directly — records that the 1e-3 sweep reports as
+`pass` are `no_pair` at 1e-10. The table above therefore describes a significance regime
+the tool does not use, and is retained only for the shape of the trade-off. The sweep was
+re-run at 1e-10; the reference curve actually used to set the default is in
+`docs/benchmarks.md`. It does not overturn `T_BITS = 10` as the fallback.
 
 A **divergence-aware `T_BITS`** (varying the threshold per-element with the tool's own
 `calibrate()`-estimated `d_hat`) was also measured and is a genuine, non-cherry-picked
@@ -325,12 +348,11 @@ vs 40.3%), and beats the nearest fixed threshold matching its false-flank rate (
 3.7%) by +26 points of det@10 and +11 of det@20. **Not implemented.** This task recommends
 the value, not a schedule; picking a per-bin schedule needs an explicit detection floor,
 not just a false-flank target, or it overcorrects exactly where catching overextension
-matters most (see `task-14-report.md`, "Does a divergence-aware threshold help?"). Recorded
-here as future work, deliberately deferred.
+matters most.
 
-**Shipped 2026-08-31 under an explicit, pre-registered detection floor.** The rule is in
-`bench/derive_schedule.py`, committed before the sweep it consumes had produced a single
-number so it could not be tuned to its own answer. In brief: the target false-flank rate
+**The schedule is derived under an explicit detection floor.** The rule lives in
+`bench/calibrate_flank_threshold.py` and is fixed before the sweep it consumes is run, so
+it cannot be tuned to its own answer. In outline: the target false-flank rate
 is the flat reference's *own pooled* rate, so the schedule is calibrated to be no worse
 overall and only changes how uniformly that rate is spread across divergence; a `t` is
 admissible in a bin only if large-flank detection stays within 2 points, mid-flank within
@@ -341,21 +363,21 @@ is the smallest admissible one meeting the target, and the bins are then forced 
 T_BITS_SCHEDULE = ((0.025, 2), (0.15, 8), (float("inf"), 10))
 ```
 
-**The shape is the opposite of what Task 14's illustrative schedules suggested.** They
-tightened the threshold at high divergence; the floor rules that out — `t=15` and `t=20`
+**The shape is the opposite of the obvious guess.** Tightening the threshold at high
+divergence is what one would reach for; the floor rules it out — `t=15` and `t=20`
 are inadmissible in *every* bin, because they cost more large-flank detection than the
 floor permits. What survives instead is a relaxation at low divergence, where false flanks
 are cheap and boundaries unambiguous: in the `d_hat < 0.025` bin, `t=2` lifts 5 bp flank
 detection from 83.7% to 98.9% for 1.5 points of false-flank rate.
 
-**Its size is modest, and smaller than Task 14 projected.** Against flat `t=10` on the
+**Its size is modest.** Against flat `t=10` on the
 same population the schedule is worth +6.0 points of det@10 and +2.1 of det@20 on the gold
 grid (+6.0 and +2.6 at 5 and 25 bp on the homology grid) for +0.4 to +0.6 points of
 false-flank rate, with pair loss unchanged. Against a flat threshold *re-tuned to the same
 false-flank rate* — the harder and fairer comparison — it is worth +3.7 points of det@10
 and +2.6 of det@5, and costs 0.0 to 1.4 points at every larger flank length. Two reasons
-it is smaller than projected: Task 14's schedules were evaluated at `MAX_EVALUE = 1e-3`,
-and they were layered on a pipeline with fixed gap penalties, which leaves far more
+it is smaller than a first pass suggested: those earlier schedules were evaluated at
+`MAX_EVALUE = 1e-3`, and were layered on a pipeline with fixed gap penalties, which leaves far more
 small-flank sensitivity on the table for a threshold schedule to recover than the
 per-element gap model does.
 
@@ -364,7 +386,7 @@ The homology grid's sweep also shows the top of the `t_bits` range is simply dom
 many 25 bp flanks and loses 47% more pairs outright.
 
 **Stage 3 takes its extension regions from the internal region, not the discovery
-window (2026-08-31).** The partner region for the 5' test used to be
+window .** The partner region for the 5' test used to be
 `S[wstart:l3b]` — the part of the *suffix window* lying before the 3' LTR. That
 had two degeneracies: it is empty whenever the hit begins exactly at the window's
 inner edge, so the snap could never fire; and it overlaps the 5' LTR itself
@@ -399,7 +421,7 @@ to skip a lead-in.
 Each extension alignment is optimal given a fixed core. The approximation is that the core
 alignment itself does not shift; this is validated by ablation.
 
-#### Two alternatives to the binary snap, measured and rejected (2026-08-31)
+#### Two alternatives to the binary snap, measured and rejected
 
 **A scored/graded extension**, replacing the binary snap with "extend to the
 furthest endpoint whose running score is still above the noise floor". The
@@ -435,8 +457,8 @@ If a flank is still called after Stage 3, search strictly outside it — `S[0:lt
 against `S[ltr3_end:L]` — for a pair significant by the Stage 2b criterion. If one exists,
 it wins, and Stages 2-3 are re-run on it.
 
-**The re-run was specified here from the beginning and was missing from the code
-until 2026-08-31.** `outermost` returned the raw Smith-Waterman ends of the outer
+**The re-run is what makes Stage 4 safe to trust.** Without it `outermost` returns the
+raw Smith-Waterman ends of the outer
 pair and `classify` used them directly, so the recovered outer element was the
 one pair in the tool whose termini were never tested — precisely the pair most
 likely to need it, since it is older and therefore more diverged than the nested
@@ -455,7 +477,7 @@ This is what makes a retained (un-excised) nested element report the outer eleme
 rather than the nested element's, which are typically younger and would otherwise score
 higher. The check is cheap because it runs only when a flank was called.
 
-**Measured on real data, and kept.** Task 14 compared Stage 4 on/off on the raw, unperturbed
+**Measured on real data, and kept.** Comparing Stage 4 on/off on the raw, unperturbed
 real datasets (deliberately not the gold-perturbed grid, whose gold-selection criteria
 require clean non-overextended raw boundaries and so structurally exclude the nested-element
 scenario this stage exists to recover):
@@ -472,7 +494,7 @@ deletion criterion above is not met, so Stage 4 stays. Every changed record reco
 outer pair exactly as designed (verified by inspection, e.g. arabidopsis
 `LR999451.1:10387972-10390268#LTR/unknown/unknown`: `[6-166]`/`[2144-2297]` with Stage 4 vs.
 a much shorter, more central `[850-1135]`/`[1150-1438]` without it). Full detail:
-`bench/out/stage4_diff_*.json`, `bench/out/memo_bench.md`.
+`bench/out/stage4_diff_*.json`.
 
 ### Stage 5 — refinement and reporting
 
@@ -504,14 +526,14 @@ because silently mis-reading it would corrupt column 23.
 **Resolved: keep WFA everywhere, no crossover to parasail.** WFA2-lib supports only a
 uniform mismatch penalty, not the ti/tv-aware calibrated matrix from Stage 2. Boundaries
 come from Stages 1-4 (parasail, calibrated matrix), so only the internal alignment path is
-affected. Task 14's `wfa_vs_matrix` ablation (`refine="matrix"` vs the default `"wfa"`,
+affected. The `wfa_vs_matrix` ablation (`refine="matrix"` vs the default `"wfa"`,
 identical boundaries by construction, measured on the 260,876-record real gold-perturbed
 grid) found the opposite of "second order": switching to the calibrated matrix roughly
 **doubles the K2P bias magnitude** in both the correctly-bounded population (-0.0087 ->
 -0.0156) and the flank-called population (-0.0066 -> -0.0134), with no reliable RMSE gain
 (marginally better in one population, worse in the other). No crossover divergence exists
 where the calibrated matrix wins outright, so WFA stays the aligner at every divergence
-level. Full table: `bench/out/memo_bench.md`, `task-14-report.md`.
+level. Full table: `docs/benchmarks.md`, `docs/benchmarks.md`.
 
 ### K2P
 
@@ -577,7 +599,7 @@ Two things are done instead:
    flank contamination — but RMSE does not move (0.0508 -> 0.0508): the variance cost of
    losing sites at these trim depths cancels the bias gain. Adopting a trim requires
    reducing RMSE, not just bias; neither population clears that bar, so no trim is applied
-   anywhere. Full per-trim-depth table: `bench/out/memo_bench.md`, `task-14-report.md`.
+   anywhere. Full per-trim-depth table: `docs/benchmarks.md`, `docs/benchmarks.md`.
 2. **Uncertain elements are flagged, not silently degraded.** Stage 3 already computes its
    decision margin, so column `flank_margin_bits` reports how decisively each boundary
    call was made. Filtering ambiguous *elements* downstream is statistically cleaner than
@@ -587,16 +609,36 @@ Two things are done instead:
 ## 4. Output columns
 
 ```
-1  seq_id        7  ltr3_end     13 n_sites     19 k2p
+1  seq_id        7  ltr3_end     13 n_sites     19 k2p                25 k2p_time
 2  seq_len       8  ltr5_len     14 n_ts        20 k2p_se
 3  status        9  ltr3_len     15 n_tv        21 bitscore
 4  ltr5_start   10  flank5_len   16 n_gapcols   22 flank_margin_bits
 5  ltr5_end     11  flank3_len   17 identity    23 cigar
-6  ltr3_start   12  aln_len      18 p_dist
+6  ltr3_start   12  aln_len      18 p_dist      24 motif
 ```
 
 The six originally requested fields are `cut -f1,4-7,19,23`. `--cs` swaps column 23 to a
 minimap2-style short `cs` string.
+
+`motif` and `k2p_time` are **appended after `cigar` rather than inserted before it**. The
+alignment string in the middle of the row is the cosmetic cost; the benefit is that every
+column predating them keeps its index, so the recipe on the line above still selects the
+same six fields and no downstream `cut`/`awk` shifts by two.
+
+`motif` is the two terminal dinucleotides of the called pair, lowercased and joined —
+`tg...ca` for canonical termini. It is read off the settled boundary and is never consulted
+while finding it. That is the whole point: §6.5 already uses the `TG`...`CA` rate as an
+unbiased external accuracy proxy precisely because the tool declines the prior, and putting
+the observation in the output does not change that. It stays a measurement of the boundary
+call, not an input to it.
+
+`k2p_time` is `round(k2p / (2 * mu))` in years, from `-u/--mutation-rate` in substitutions
+per site per year, and `NA` without it. The factor of two is the two branches: the LTRs are
+identical at insertion and diverge independently, so the observed divergence is twice the
+age in substitutions. There is deliberately **no default rate** — it is a property of the
+species, not of the software, and a silently-assumed one rescales every age in the table.
+`-u` is a unit conversion applied after the measurement and can move nothing else in the
+row; a test pins that.
 
 `flank_margin_bits` reports the smaller of the two Stage 3 decision margins,
 `min(|s5 + T|, |s3 + T|)` in bits: how decisively the boundary call was made. Large values
@@ -650,18 +692,40 @@ honest response, not because it is expected to fire.
 ltrk2p/
 ├── pyproject.toml, environment.yml, README.md, LICENSE
 ├── src/ltrk2p/
-│   ├── cli.py      argparse entry point
-│   ├── fasta.py    streaming gzip-aware reader, sanitisation
-│   ├── scoring.py  calibrated log-odds matrix, bit scores
+│   ├── cli.py argparse entry point
+│   ├── fasta.py streaming gzip-aware reader, sanitisation
+│   ├── scoring.py calibrated log-odds matrix, bit scores
 │   ├── align.py    Stages 1-4
-│   ├── k2p.py      distance and variance
-│   ├── cigar.py    extended CIGAR and cs emission
-│   └── runner.py   parallel driver, ordered writer, resume
+│   ├── k2p.py distance, variance, insertion time
+│   ├── cigar.py extended CIGAR and cs emission
+│   ├── extras.py derived records: consensus, internal, perfect, trimmed
+│   ├── cluster.py mmseqs2 identity sweep
+│   ├── plot.py K2P density figure
+│   └── runner.py parallel driver, ordered writer, resume
 ├── tests/          pytest, tiny synthetic fixtures
 └── bench/          build_truth · simulate · run_bench · figures
 ```
 
-**CLI:** `ltrk2p [-o OUT] [--cs] [-t 20] [--resume] [-v] input.fa[.gz]`
+**CLI:** `ltrk2p [-o OUT] [-u RATE] [--cs] [-t 20] [--resume] [-v] input.fa[.gz]`
+
+**The optional outputs are re-implementations, not ports.** The consensus LTR in particular
+is free here: `classify` already holds the exact WFA global alignment of the final pair, so
+the IUPAC consensus is one walk over two strings. The pipeline this replaces reached the
+same object through MAFFT, then trimal, then a second alignment — three external tools and
+two alignments per element — and could therefore produce a consensus that disagreed with
+its own reported divergence. Here they are two readings of one alignment.
+
+`align.classify` keeps its exact signature and return type; the aligned pair reaches
+`extras` through a private `_classify` that returns `(Result, aligned_pair)`. The pair is
+deliberately not a `Result` field: every record would then carry two more kilobyte-scale
+strings home from its worker, on every run, for a payload the TSV never emits.
+
+`fasta.read_fasta_raw` yields `(id, sanitised, original)`, the two indexing identically, so
+a coordinate measured on one slices the other. Every emitted record that is a **slice of the
+input** is cut from `original` and so reproduces it character for character; only the IUPAC
+consensus is synthesised, and it is uppercase. Writing the sanitised copy back out as "your
+element, trimmed" would hand the user a file with their soft-masking flattened and their
+ambiguity codes replaced by `N` — strictly worse than the one they supplied.
 
 Advanced knobs (`--flank-bits`, `--min-bitscore`, `--max-window`) exist and are
 documented, but every default is set by the benchmark rather than by hand.
@@ -717,7 +781,7 @@ Comparing against realized K2P isolates *tool* error. Comparing against nominal 
 the K2P estimator itself, which is a separate and already-known quantity. Reporting both
 keeps them from being confounded, which is the usual way this kind of benchmark misleads.
 
-### 6.2b Homology-only grid (added 2026-08-31)
+### 6.2b Homology-only grid
 
 Sections 6.1-6.2 build elements from library consensus; section 6.5's gold-subset
 benchmark perturbs *real* elements but selects them with `select_gold`, which filters on
@@ -748,7 +812,7 @@ ancestral trace alongside each descendant; `true_alignment` merges two traces in
 exact pairwise alignment. `realized_p` and `realized_k2p` are therefore measurements, not
 approximations, even under indels. This is the one thing the older simulator cannot do:
 `bench/simulate.py` computes `realized_k2p` by truncate-and-compare on unaligned strings,
-which Task 14 found disagrees materially with a proper alignment even at `indel_frac=0`
+which disagrees materially with a proper alignment even at `indel_frac=0`
 and is simply wrong once indels are switched on. `simulate.py` is unchanged and still
 carries that flaw; nothing measured on this grid depends on it.
 
@@ -767,19 +831,19 @@ and real internal structure, but still selected from a prediction TSV).
 
 Every design element must earn its place:
 
-| Ablation | Expectation | Result (Task 14/16, measured on the 260,876-record real gold-perturbed grid) |
+| Ablation | Expectation | Result (measured on the 260,876-record real gold-perturbed grid) |
 |---|---|---|
 | BLASTN-style 1/-3 scoring baseline | fails badly past ~20% divergence (break-even ~75% identity) | confirmed: pooled false-flank 46.4% vs calibrated's 20.2%; crosses 50% between d=0.2 (46.1%) and d=0.3 (74.5%), matching the predicted ~75% identity break-even |
 | fixed +1/-1 vs. calibrated log-odds | quantifies what Stage 2 buys | fixed_1_1 sits between calibrated and blastn_1_3 throughout (pooled false-flank 28.6%); calibration roughly halves the false-flank rate fixed_1_1 would otherwise show at moderate-high d |
 | Stage 3 on/off | headline: the ~46% false-flank rate at p=0.25 should collapse | confirmed: no_stage3 pooled false-flank 56.2% vs calibrated (Stage 3 on) 20.2%; on synthetic perfectly-bounded elements at p=0.25, raw SW is wrong 63/80 (79%) vs Stage 3's 1/80 (1.2%), a 63x improvement |
 | Stage 4 on/off | delete Stage 4 if it never fires | **kept** — fires on 0.71% of raw real predictions (413/57,958: arabidopsis 1.07%, human 1.83%, truth.fa 0.01%), always recovering the outer pair; see Stage 4 section above |
 | WFA uniform penalty vs. calibrated matrix in Stage 5 | decides the Stage 5 aligner | **WFA kept everywhere** — the calibrated matrix roughly doubles K2P bias magnitude with no reliable RMSE gain; see Stage 5 section above |
-| Stage 1 iteration count | confirms one recalibration pass suffices | not measured in Task 14/16 (out of scope); `classify()` still performs exactly one recalibration pass (`discover` -> `calibrate` -> `discover` again), unchanged |
-| **gap penalties: fixed 6/2 vs fixed 10/1 vs per-element** (2026-08-31) | decides whether the indel-rate estimate Stage 2 specifies is worth using | **per-element adopted.** At matched false-flank rate it dominates fixed 6/2 on every flank length of the homology grid (+10.5 points at 5 bp, +7.5 at 25, +2.1 at 45, +0.7 at 65) while losing fewer pairs; on the gold grid it trades -1.7 points at 50 bp for +14.0 at 10 bp. Cuts K2P RMSE 35% and bias 52% on the indel panel. Costs +2.6% runtime |
-| **composition from the LTR core vs the whole element** (2026-08-31) | tests whether the log-odds denominator should describe the repeat or its surroundings | **rejected** — worse on every panel of both grids (homology `bnd_mae` 3.29 -> 3.79, det@25 79.2% -> 74.1%, false-flank 0.20% -> 0.41%) |
-| **graded flank extension vs the binary snap** (2026-08-31) | tests whether a flank call should be a position rather than a verdict | **rejected** — the unpenalised form is provably a no-op (0 of 1,194 records); the `-T`-thresholded form costs 2.7x boundary error and 28x K2P bias for no false-flank gain |
-| **joint inner boundaries** (2026-08-31) | tests whether the inner ends being by-products of the outer snaps costs accuracy | **rejected** — fires on 418 of 62,644 records, right more often than wrong (276/140) but wrong by far more (mean inner error 242 -> 557); pooled error unchanged |
-| **non-destructive significance gate** (2026-08-31) | tests whether labelling beats deleting | **adopted** — recovers 1,386 of 70,000 records, verified to change no field of any record the old gate accepted (0 of 62,648), at zero runtime cost |
+| Stage 1 iteration count | confirms one recalibration pass suffices | not measured; `classify()` still performs exactly one recalibration pass (`discover` -> `calibrate` -> `discover` again), unchanged |
+| **gap penalties: fixed 6/2 vs fixed 10/1 vs per-element**  | decides whether the indel-rate estimate Stage 2 specifies is worth using | **per-element adopted.** At matched false-flank rate it dominates fixed 6/2 on every flank length of the homology grid (+10.5 points at 5 bp, +7.5 at 25, +2.1 at 45, +0.7 at 65) while losing fewer pairs; on the gold grid it trades -1.7 points at 50 bp for +14.0 at 10 bp. Cuts K2P RMSE 35% and bias 52% on the indel panel. Costs +2.6% runtime |
+| **composition from the LTR core vs the whole element**  | tests whether the log-odds denominator should describe the repeat or its surroundings | **rejected** — worse on every panel of both grids (homology `bnd_mae` 3.29 -> 3.79, det@25 79.2% -> 74.1%, false-flank 0.20% -> 0.41%) |
+| **graded flank extension vs the binary snap**  | tests whether a flank call should be a position rather than a verdict | **rejected** — the unpenalised form is provably a no-op (0 of 1,194 records); the `-T`-thresholded form costs 2.7x boundary error and 28x K2P bias for no false-flank gain |
+| **joint inner boundaries**  | tests whether the inner ends being by-products of the outer snaps costs accuracy | **rejected** — fires on 418 of 62,644 records, right more often than wrong (276/140) but wrong by far more (mean inner error 242 -> 557); pooled error unchanged |
+| **non-destructive significance gate**  | tests whether labelling beats deleting | **adopted** — recovers 1,386 of 70,000 records, verified to change no field of any record the old gate accepted (0 of 62,648), at zero runtime cost |
 | terminal trim of 0/3/5/10 bp per LTR end | decides whether trimming is adopted; measured for bias *and* RMSE, overall and within the flank-called subset | **not adopted, `trim=0` stays default** — RMSE flat at every trim depth in both populations; trim_10 cuts flank-called-subset bias ~32% but RMSE is unchanged (variance from fewer sites cancels it); see "Terminal sites are not trimmed by default" above |
 
 ### 6.5 Real data, three independent checks
@@ -793,9 +857,8 @@ Every design element must earn its place:
    informative.
 3. **TSD detection** at called flanks — a second independent signal, same logic.
 
-**Re-run 2026-08-31 against the new defaults** (divergence-aware `T_BITS`,
-per-element gap penalties; `bench/out/improve/`, job `20255338`, 256,776 records in
-00:11:50). Every dataset improved on both proxies, and every perfectly-bounded rate
+**Run against the shipped defaults** (divergence-aware `T_BITS`, per-element gap
+penalties; 256,776 records in 11 min 50 s at 20 threads). Every dataset improved on both proxies, and every perfectly-bounded rate
 stayed above its raw-input-ends baseline: 5' `TG` at flank=0 rose 0.6462 -> 0.6661
 (arabidopsis, baseline 0.6052), 0.3182 -> 0.3272 (human, 0.2974), 0.7591 -> 0.7910
 (poa, 0.7240) and 0.8849 -> 0.9016 (MTEC, 0.3533); TSD enrichment over the
@@ -805,11 +868,11 @@ confirmation independent of both benchmark grids. Caveat recorded honestly: the 
 rate at flank-CALLED boundaries also rose (arabidopsis 0.0815 -> 0.1236), narrowing the
 flank=0 : flank>0 ratio from 7.9x to 5.4x — more small flanks are called, and some sit
 at canonical boundaries. The row-count invariant holds exactly on all seven datasets,
-and `negatives.fa` false-`pass` is 5.14% against Task 16's 5.23% with the shuffled null
+and `negatives.fa` false-`pass` is 5.14% against 5.23% before the change, with the shuffled null
 still at exactly zero, confirming `MAX_EVALUE` was not disturbed. Full tables:
-`bench/out/memo_improve.md`.
+`docs/benchmarks.md`.
 
-**Task 16 ran all three** against its own defaults (T_BITS=10.0, MAX_EVALUE=1e-10;
+**All three were run** against the previous defaults (T_BITS=10.0, MAX_EVALUE=1e-10;
 `bench/out/real_*.tsv`, job `20201250`, 256,776 records across the seven datasets in
 00:05:06). Headline: on every genomic/putative-intact dataset (arabidopsis, poa, human,
 plus MTEC's maize library), boundaries the tool calls perfectly-bounded (`flank_len==0`)
@@ -817,8 +880,8 @@ land on `TG`...`CA` 4-10x more often than boundaries it calls flank-corrected, a
 above the raw-input-ends baseline — an unbiased, tool-blind confirmation the boundary logic
 is doing its job. TSD presence at flank-called boundaries is 3-7x enriched over a shifted-
 10bp local control at k=5 on every dataset with enough records to be meaningful. Full
-tables, per-dataset breakdown, and the before/after comparison against the pre-Task-16
-defaults: `bench/out/memo_real.md`.
+tables, per-dataset breakdown, and the before/after comparison against the previous
+defaults: `docs/benchmarks.md`.
 
 ### 6.6 Negative controls
 
@@ -826,7 +889,7 @@ Dfam and Repbase non-LTR entries (DNA transposons, LINEs, SINEs, Helitrons) plus
 sequence, measuring the false-positive rate for `status = pass`. This sets `MAX_EVALUE`
 (and, through it, `--min-bitscore`'s effective floor).
 
-**Task 16 measured this against `bench/out/negatives.fa`** (46,823 real non-LTR TEs from
+**A later revision measured this against `bench/out/negatives.fa`** (46,823 real non-LTR TEs from
 two independent libraries -- Dfam-RepeatMasker and Repbase, plus MTEC and riceTElib --
 with LTR-class and ambiguous tyrosine-recombinase classes excluded) and a mononucleotide-
 shuffled null drawn from the library-consensus truth set (`bench/simulate.shuffle_dinuc`,
@@ -881,7 +944,7 @@ new default**: it is the last point before the steep part of this cost curve (ar
 real non-LTR TEs (9.09% -> 5.23%, a genuine, substantial improvement). It does **not**
 reach <1%, and no threshold does at acceptable cost; this is reported as a measured,
 inherent limitation rather than forced past the point the data supports. Full sweep,
-per-class breakdown and example records: `bench/out/memo_real.md`,
+per-class breakdown and example records: `docs/benchmarks.md`,
 `bench/out/negatives_diagnosis.json`, `bench/out/maxevalue_sweep.json`,
 `bench/out/maxevalue_truepos_sweep.json`.
 
@@ -906,13 +969,12 @@ pytest with tiny synthetic fixtures (not real data):
 
 ### 6.9 Compute
 
-Benchmark jobs: `bio250178` allocation, `shared` partition, 20 threads. Each run produces
-a `memo_*.md` recording date, purpose, environment and versions, input provenance, exact
-commands, expected outputs, and notes.
+Benchmark jobs assume 20 cores; the launchers in `bench/` take `REPO`, `DATA` and `PY`
+from the environment. Results are recorded in `docs/benchmarks.md`.
 
 ## 7. Known limits — to be measured, not assumed
 
-- **Inner-boundary error — quantified 2026-08-31, and it is not what was predicted.**
+- **Inner-boundary error — quantified and it is not what was predicted.**
   Measured on correctly-bounded gold records, the inner boundaries are called *too long*,
   not trimmed: mean error +6.3 bp at `d=0.1` rising to +14.6 bp at `d=0.5`, MAE 3.9 to
   16.5 bp, median 0 with a heavy right tail. The predicted downward K2P bias from trimmed,
@@ -954,8 +1016,8 @@ commands, expected outputs, and notes.
 
 ## 8. Environment
 
-conda env `ltrrt4` at `/anvil/projects/x-bio250178/conda/envs/ltrrt4`:
-python 3.11, parasail-python, pywfa (built against the env toolchain; the system OpenMPI
-compiler wrapper must not be used), numpy, scipy, pandas, matplotlib, pytest, biopython.
+Python 3.10+, `parasail-python`, `pywfa` and `numpy`; `pytest` for the test suite.
+`pywfa` must be built against the same toolchain as the environment -- on an HPC
+system, do not let a system MPI compiler wrapper be picked up.
 
 Shipped as `environment.yml`.

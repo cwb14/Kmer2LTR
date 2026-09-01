@@ -5,9 +5,23 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "ltrk2p"
 version = "0.1.0"
-description = "LTR-RT boundary classification and K2P divergence"
+description = "Locate the LTR pair in an LTR retrotransposon and measure its K2P divergence"
+readme = "README.md"
+license = {file = "LICENSE"}
+authors = [{name = "Chris Benson"}]
+keywords = ["bioinformatics", "transposable-elements", "LTR", "retrotransposon", "kimura"]
+classifiers = [
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Programming Language :: Python :: 3",
+]
 requires-python = ">=3.10"
 dependencies = ["parasail", "pywfa", "numpy"]
+
+[project.optional-dependencies]
+# --plot only. Clustering needs the mmseqs2 binary, which is not a
+# Python package -- see environment.yml.
+plot = ["matplotlib"]
 
 [project.scripts]
 ltrk2p = "ltrk2p.cli:main"

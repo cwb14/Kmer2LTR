@@ -1,0 +1,15 @@
+name: ltrk2p
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python>=3.10
+  - numpy
+  - pip
+  - pytest
+  # optional: --plot needs matplotlib, --ltr-cluster/--internal-cluster need mmseqs2
+  - matplotlib
+  - mmseqs2
+  - pip:
+      - parasail
+      - pywfa
