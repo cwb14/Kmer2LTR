@@ -1,7 +1,6 @@
 """Grid benchmark: known perturbations of gold real elements, scored against
 perturbation-defined truth -- the "does the tool recover the known-correct
-answer" benchmark. See `bench/gold_subset.py`'s module docstring and
-`bench/out/memo_gold_robustness.md` for the full
+answer" benchmark. See `bench/gold_subset.py`'s module docstring for the full
 circularity argument; the short version: this cannot show the tool calls
 boundaries correctly on arbitrary input (selection uses the tool's own
 output), but it CAN show whether a known perturbation of an already-clean
@@ -21,8 +20,7 @@ Pipeline, per dataset:
 
 One `random.Random(seed)` per dataset is created ONCE, outside every loop,
 and threaded through the whole grid build for that dataset -- never
-re-seeded per element or per cell (the harness footgun this benchmark's brief
-explicitly calls out: many short-lived `Random()` instances seeded from a
+re-seeded per element or per cell (a harness footgun worth calling out: many short-lived `Random()` instances seeded from a
 coarse counter can correlate cells that are supposed to be independent).
 """
 from __future__ import annotations

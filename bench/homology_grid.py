@@ -30,8 +30,7 @@ Three perturbation axes, applied to those perfect elements:
 
 **The true alignment is tracked through evolution**, so `realized_p` and
 `realized_k2p` are exact rather than approximated. `bench/simulate.py` computes
-its `realized_k2p` by truncate-and-compare on unaligned strings, which Task 14
-found disagrees materially with a proper alignment even at `indel_frac=0`; with
+its `realized_k2p` by truncate-and-compare on unaligned strings, which disagrees materially with a proper alignment even at `indel_frac=0`; with
 indels switched on it is simply wrong. Nothing here inherits that.
 """
 from __future__ import annotations
@@ -169,21 +168,21 @@ def true_alignment(a: str, ta, b: str, tb) -> tuple[str, str]:
     ra: list[str] = []
     i = j = 0
     while i < len(a) or j < len(b):
-        ai = ta[i] if i < len(a) else None
-        bj = tb[j] if j < len(b) else None
-        if i < len(a) and ai is None:
+        anc_a = ta[i] if i < len(a) else None
+        anc_b = tb[j] if j < len(b) else None
+        if i < len(a) and anc_a is None:            # inserted on branch a
             qa.append(a[i]); ra.append("-"); i += 1
-        elif j < len(b) and bj is None:
+        elif j < len(b) and anc_b is None:          # inserted on branch b
             qa.append("-"); ra.append(b[j]); j += 1
         elif i >= len(a):
             qa.append("-"); ra.append(b[j]); j += 1
         elif j >= len(b):
             qa.append(a[i]); ra.append("-"); i += 1
-        elif ai == bj:
+        elif anc_a == anc_b:                        # same ancestral site
             qa.append(a[i]); ra.append(b[j]); i += 1; j += 1
-        elif ai < bj:
+        elif anc_a < anc_b:                         # deleted on branch b
             qa.append(a[i]); ra.append("-"); i += 1
-        else:
+        else:                                       # deleted on branch a
             qa.append("-"); ra.append(b[j]); j += 1
     return "".join(qa), "".join(ra)
 

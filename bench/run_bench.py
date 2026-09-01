@@ -1,24 +1,23 @@
 """Benchmark harness: synthetic dataset generation, generic scoring, and the
 spec section 6.4 ablation grid.
 
-**Priority-change context (Task 14, 2026-08-28).** Task 18's gold-subset
+**Context.** The gold-subset
 benchmark (`bench/gold_subset.py`, `bench/gold_robustness.py`) found that
-`T_BITS = 5.0` -- calibrated in Task 11 on SYNTHETIC sequence -- badly
+`T_BITS = 5.0`, calibrated on SYNTHETIC sequence, badly
 under-calls overextension on REAL element sequence (false-flank rate at
 d=0.30 measured 26.8% on real gold data vs a synthetic-only estimate of
 1.2%, a ~20x gap). This module's single most important job is therefore a
-T_BITS sweep measured on the REAL gold-perturbed grid Task 18 already built
+T_BITS sweep measured on the REAL gold-perturbed grid
 (`bench/out/gold_perturbed.fa` / `bench/out/gold_truth.tsv`), not a rebuild
 of that machinery -- see `score_gold_grid`, `sweep_t_bits`, and
-`analyze_dhat_threshold` below. The brief's original interfaces
+`analyze_dhat_threshold` below. The original interfaces
 (`make_dataset`, `score_run`, `ablate`) are implemented in full and are what
 drive both the literal spec 6.4 grid on synthetic data AND, reusing the very
 same `ablate()`, the gold-data ablation grid.
 
-Everything here is orchestration: every ablation "mechanism" the brief lists
+Everything here is orchestration: every ablation "mechanism" listed
 (fixed matrix, no_stage3, no_stage4, wfa_vs_matrix, trim_K) is ALREADY a
-keyword-only knob on `ltrk2p.align.classify` (Task 14's brief: "classify()
-has keyword-only ablation knobs"). Nothing in `ltrk2p/` is modified by this
+keyword-only knob on `ltrk2p.align.classify` on `ltrk2p.align.classify`. Nothing in `ltrk2p/` is modified by this
 module or by running it.
 """
 from __future__ import annotations
@@ -57,10 +56,10 @@ def _fmt(v) -> str:
 
 
 # =========================================================================== #
-# make_dataset -- synthetic grid from library-consensus truth (Task 12/13)
+# make_dataset -- synthetic grid from library-consensus truth
 # =========================================================================== #
 
-# Matches score_run's required truth columns (elem_id, ltr5_start, ltr5_end,
+# Required truth columns for score_run (elem_id, ltr5_start, ltr5_end,
 # ltr3_start, ltr3_end, d_nominal, realized_k2p, flank5, flank3) plus two
 # informational extras (orig_elem_id, kappa) that score_run never reads.
 SIM_TRUTH_COLUMNS = [
@@ -71,18 +70,18 @@ SIM_TRUTH_COLUMNS = [
 
 def make_dataset(truth_fa, truth_tsv, out_fa, out_truth_tsv, ds, kappas, flanks,
                   n_per_cell, seed) -> int:
-    """Build a simulated benchmark grid from Task 12's ground truth.
+    """Build a simulated benchmark grid from the library-consensus ground truth.
 
     For every truth element, split its sequence into (ltr, internal) using
     the truth TSV's own coordinates, then call `bench.simulate.simulate_element`
-    once per (d, kappa, flank, rep) cell -- reusing Task 13's evolution model
-    rather than a second one. Writes a FASTA record and a truth-TSV row per
+    once per (d, kappa, flank, rep) cell -- reusing the evolution model
+    rather than writing a second one. Writes a FASTA record and a truth-TSV row per
     generated sequence; a unique id is assigned per cell (`{elem_id}__d{d}
     __k{kappa}__f{flank}__r{rep}`) since one source element produces many
     output records.
 
     `truth_fa` and `truth_tsv` are joined by RECORD ORDER, not by `elem_id`
-    lookup -- the same convention used throughout this codebase
+    lookup -- the convention used throughout this codebase
     (`bench.gold_subset.select_gold`, `bench.gold_robustness.score_gold`):
     build_truth.py writes the two files together, in the same order, and an
     id-keyed join would be wrong the moment an id is not unique (which
@@ -276,7 +275,7 @@ def _parallel_map(fasta_path, work_fn, threads: int, *extra_args):
 # ablate -- run classify() over a FASTA under one named configuration
 # =========================================================================== #
 
-# spec 6.4 / task-14-brief.md's grid. "calibrated" is classify()'s own
+# spec 6.4 / the spec 6.4 grid. "calibrated" is classify()'s own
 # default in every respect -- listed explicitly (rather than left implicit)
 # so this dict is a complete, readable inventory of the grid on its own.
 # Every mechanism here is an EXISTING classify() keyword; ablate() adds no
@@ -354,7 +353,7 @@ def ablate(name: str, fasta_path, out_tsv, *, threads: int = 1, cs: bool = False
     the T_BITS sweep as a variant of the default configuration rather than
     inventing a second mechanism for it.
 
-    Scoring is a separate step -- ablate's only job (per the brief) is to
+    Scoring is a separate step -- ablate's only job () is to
     produce the prediction TSV. Returns a small run summary: `{"name",
     "kwargs", "fasta", "out_tsv", "n", "elapsed_s"}`.
     """
@@ -419,7 +418,7 @@ def compute_dhat(fasta_path, out_tsv, threads: int = 1) -> int:
 
 # =========================================================================== #
 # score_gold_grid -- score one ablate()-produced prediction TSV against
-# Task 18's gold-perturbation truth (bench/out/gold_truth.tsv)
+# the gold-perturbation truth (bench/out/gold_truth.tsv)
 # =========================================================================== #
 
 # Bin edges = midpoints between consecutive D_GRID values, so a d_hat bin
@@ -467,7 +466,7 @@ def score_gold_grid(truth_tsv, pred_tsv, dhat_tsv=None) -> dict:
     # realized-K2P ground truth for the perturbed grid, unlike make_dataset's
     # synthetic truth -- see score_run's docstring), restricted to status=pass
     # rows with a numeric k2p. This is what the trim ablation's "overall vs
-    # within the flank-called subset" comparison (task-14-brief.md) reads.
+    # within the flank-called subset" comparison  reads.
     by_called: dict = defaultdict(lambda: defaultdict(float))
 
     with ExitStack() as stack:
@@ -609,7 +608,7 @@ def _milestone(msg: str) -> None:
 
 def _run_synthetic_ablation_grid(truth_fa, truth_tsv, outdir: Path, threads: int,
                                   n_truth_sample: int, seed: int) -> None:
-    """The brief's literal spec-6.4 grid: build ONE synthetic dataset with
+    """The literal spec-6.4 grid: build ONE synthetic dataset with
     `make_dataset` (subsampled to `n_truth_sample` truth elements -- keeps
     this demonstrative run's cost modest; the headline real-data ablation
     numbers come from `_run_gold_analysis`, not from here) and score every
@@ -663,16 +662,15 @@ def _run_gold_analysis(gold_fa: Path, gold_truth: Path, outdir: Path, threads: i
                         tbits_values: list[float], run_ablations: bool,
                         run_dhat: bool) -> None:
     """The priority-change deliverable: T_BITS sweep + ablation grid measured
-    on Task 18's real gold-perturbed data, plus (optionally) the d_hat pass
+    on the real gold-perturbed data, plus (optionally) the d_hat pass
     the divergence-aware-threshold analysis needs. Reuses
-    `bench/out/gold_pred.tsv` for t_bits==align.T_BITS (5.0) instead of
-    recomputing it -- it is already exactly the "calibrated"/trim_0 config
-    at the shipped default.
+    `bench/out/gold_pred.tsv` where it already corresponds to the requested
+    configuration, instead of recomputing it.
     """
     from ltrk2p.align import T_BITS as DEFAULT_T_BITS
 
     # Resolved relative to this file, not cwd: this is a cross-reference to
-    # Task 18's one canonical output, independent of --outdir or where the
+    # the one canonical output, independent of --outdir or where the
     # caller's shell happens to be when this script runs.
     default_pred = Path(__file__).resolve().parent / "out" / "gold_pred.tsv"
 
@@ -731,7 +729,7 @@ def _run_gold_analysis(gold_fa: Path, gold_truth: Path, outdir: Path, threads: i
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--truth-fa", help="Task 12 library-consensus truth FASTA")
+    ap.add_argument("--truth-fa", help="library-consensus truth FASTA")
     ap.add_argument("--truth-tsv", help="matching truth TSV")
     ap.add_argument("--outdir", default="bench/out")
     ap.add_argument("--threads", type=int, default=20)

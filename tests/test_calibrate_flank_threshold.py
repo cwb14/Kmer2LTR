@@ -4,7 +4,7 @@ import math
 
 import pytest
 
-from bench.derive_schedule import (DHAT_LABELS, LARGE_TOL, MID_TOL, MIN_BIN_N,
+from bench.calibrate_flank_threshold import (DHAT_LABELS, LARGE_TOL, MID_TOL, MIN_BIN_N,
                                    REFERENCE_T, as_python, derive)
 
 TS = (2.0, 5.0, 10.0, 20.0)

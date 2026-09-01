@@ -163,7 +163,7 @@ def test_flank_is_composition_matched_but_reordered():
     assert f.count("A") > f.count("G")
 
 
-def test_grid_shape_is_what_the_brief_asked_for():
+def test_grid_covers_the_specified_axes():
     got = list(cells())
     subs = [c for c in got if c[0] == "subs"]
     indel = [c for c in got if c[0] == "indel"]

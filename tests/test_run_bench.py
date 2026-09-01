@@ -43,7 +43,7 @@ def test_score_run_detects_boundary_error(tmp_path):
 
 # --------------------------------------------------------------------------- #
 # Additional coverage: ablate(), the fixed-matrix pickling workaround, and
-# score_gold_grid(). Not brief-specified, but "every standalone tool gets at
+# score_gold_grid(). Not strictly required, but "every standalone tool gets at
 # least basic tests" (project convention) -- and the fixed-matrix path is a
 # genuine footgun (parasail.Matrix cannot be pickled; ProcessPoolExecutor
 # would silently hang/crash if a config tried to pass one through) worth a
@@ -186,7 +186,7 @@ def test_score_gold_grid_matches_hand_counted_cells(tmp_path):
 
 def test_trim_leaves_boundaries_and_flank_calls_unchanged():
     """The trim ablation's "overall vs within the flank-called subset" K2P
-    comparison (task-14-brief.md) is only valid if every trim_K config
+    comparison is only valid if every trim_K config
     reports the SAME boundaries/flank calls for a given input -- otherwise
     "the flank-called subset" would mean a DIFFERENT population of records
     for each K, and cross-config bias/RMSE comparisons would not isolate

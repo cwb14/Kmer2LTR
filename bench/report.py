@@ -1,4 +1,4 @@
-"""Turn `run_improve.py`'s scored-cell JSON into comparison tables.
+"""Turn `run_configs.py`'s scored-cell JSON into comparison tables.
 
 Reporting rules, applied uniformly so configurations cannot be flattered by the
 choice of denominator:
@@ -123,7 +123,7 @@ def _table(title, rows, cols, keycol="config"):
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--outdir", default="bench/out/improve")
+    ap.add_argument("--outdir", default="bench/out/configs")
     ap.add_argument("--configs", required=True)
     ap.add_argument("--source", default="lib")
     ap.add_argument("--per-d", action="store_true", help="also break the gold grid out by d")

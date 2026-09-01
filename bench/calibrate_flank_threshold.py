@@ -1,13 +1,12 @@
 """Derive the divergence-aware `T_BITS` schedule under a PRE-REGISTERED rule.
 
-Task 14 measured that a divergence-aware threshold is a genuine Pareto
-improvement over any fixed one, and then deliberately declined to ship a
-schedule, for a specific reason: "the per-bin schedule needs to be chosen with
-an explicit detection floor in mind, not just a false-flank target, or it will
-overcorrect exactly where overextension is most consequential to still catch."
+A divergence-aware threshold is a genuine Pareto improvement over any single
+fixed one, but the per-bin schedule has to be chosen against an explicit
+detection floor and not merely a false-flank target, or it overcorrects exactly
+where catching overextension matters most.
 
-This file is that explicit floor. It is written and committed BEFORE the sweep
-it consumes has been run, so the rule cannot be tuned to its own answer.
+This file is that explicit floor. The rule is fixed before the sweep it consumes
+is run, so it cannot be tuned to its own answer.
 
 --------------------------------------------------------------------------- #
 THE RULE
@@ -19,8 +18,7 @@ Reference throughout is the shipped flat `t_bits = 10`.
    all bins. The schedule is therefore calibrated to be no worse overall than
    today; what it changes is the *uniformity* of that rate across divergence.
    A claimed flank should carry the same weight of evidence whether the element
-   is 2% or 40% diverged, and at a fixed threshold it does not: Task 14 measured
-   the rate swinging 40-80x across the `d_hat` range at constant `t_bits`.
+   is 2% or 40% diverged, and at a fixed threshold it does not: the rate swings 40-80x across the `d_hat` range at constant `t_bits`.
 
 2. A value `t` is ADMISSIBLE in bin `b` only if, in that same bin, relative to
    the flat reference:
@@ -28,8 +26,7 @@ Reference throughout is the shipped flat `t_bits = 10`.
                                                    homology: 45 and 65 bp)
        mid-flank detection is within 5 points     (gold: 20 bp; homology: 25 bp)
        the pair-loss rate has risen by at most 2 points
-   Raising `t_bits` costs pairs outright as well as flank calls -- Task 14 saw
-   `n_pass` fall at high divergence -- so pair loss is a constrained quantity,
+   Raising `t_bits` costs pairs outright as well as flank calls -- `n_pass` falls at high divergence -- so pair loss is a constrained quantity,
    not a free one. Admissibility must hold on both grids wherever both have
    evidence (see step 5): the gold grid for continuity with every prior
    measurement, and the homology grid because it is the one that owes nothing to
@@ -52,10 +49,6 @@ Reference throughout is the shipped flat `t_bits = 10`.
    35% mutated, so it has little mass in the top `d_hat` bins by construction,
    and letting a structurally empty bin veto would discard the gold grid's
    evidence exactly where the false-flank problem is worst.
-
-   (Amended 2026-08-31, after the rule was first committed but BEFORE the sweep
-   it consumes had produced a single number -- the amendment is forced by the
-   grid's known divergence coverage, not by any result.)
 """
 from __future__ import annotations
 
@@ -242,7 +235,7 @@ def as_python(schedule) -> str:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--outdir", default="bench/out/improve")
+    ap.add_argument("--outdir", default="bench/out/configs")
     ap.add_argument("--base", default="baseline")
     ap.add_argument("--tbits", default="2,5,8,10,15,20,30")
     ap.add_argument("--source", default=None, help="homology panel to constrain on")

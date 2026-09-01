@@ -1,4 +1,4 @@
-"""Measurement campaign for the 2026-08-31 improvement round.
+"""Named pipeline configurations, run over both benchmark grids and scored.
 
 Every candidate change is a keyword on `ltrk2p.align.classify`, so this module
 is pure orchestration: it names configurations, runs each over both benchmark
@@ -13,9 +13,8 @@ The two grids answer different questions and are both reported:
     known substitutions, flanks and indels, with an EXACT true alignment. No
     motif, no TSD, no tool involvement in selection: homology only.
 
-`BASELINE` reproduces the shipped pre-campaign behaviour exactly, so every
-one-at-a-time configuration differs from it in a single knob and the equivalence
-of the refactor itself is checkable against `bench/out/gold_pred_tbits_10.tsv`.
+`BASELINE` pins every knob explicitly, so each named configuration differs from
+it in exactly one place and an ablation measures one thing at a time.
 """
 from __future__ import annotations
 
@@ -35,21 +34,21 @@ from bench.homology_grid import score_homology  # noqa: E402
 from bench.homology_grid import cells_to_json as hom_cells_to_json  # noqa: E402
 from bench.run_bench import _parallel_map, ablate, cells_to_json, score_gold_grid  # noqa: E402
 
-# The shipped pre-campaign pipeline, stated explicitly rather than left implicit
-# as "the defaults" -- the defaults are exactly what this campaign is changing.
+# Stated explicitly rather than left implicit as "the defaults", so a change to
+# the defaults cannot silently move the reference an ablation is measured against.
 BASELINE = dict(t_bits=10.0, snap_mode="binary", inner="none", comp="element",
                 gap_scheme="legacy", keep_weak=False, stage4_recal=False)
 
 CONFIGS: dict[str, dict] = {
     "baseline": {},
-    "stage4_rerun": dict(stage4_recal=True),      # item 2
-    "keep_weak": dict(keep_weak=True),            # item 3
-    "graded": dict(snap_mode="graded"),           # item 4
-    "inner_joint": dict(inner="joint"),           # item 5
-    "comp_core": dict(comp="core"),               # item 6
-    "gaps_static": dict(gap_scheme="static"),     # item 7a
-    "gaps_adaptive": dict(gap_scheme="adaptive"),  # item 7b
-    "schedule": dict(t_bits=None),                # item 1
+    "stage4_rerun": dict(stage4_recal=True),
+    "keep_weak": dict(keep_weak=True),
+    "graded": dict(snap_mode="graded"),
+    "inner_joint": dict(inner="joint"),
+    "comp_core": dict(comp="core"),
+    "gaps_static": dict(gap_scheme="static"),
+    "gaps_adaptive": dict(gap_scheme="adaptive"),
+    "schedule": dict(t_bits=None),
     # The pipeline carried forward: the two directed items plus the gap scheme,
     # still at a FIXED t_bits so the sweep below can re-tune it honestly.
     "candidate": dict(stage4_recal=True, keep_weak=True, gap_scheme="adaptive"),
@@ -65,7 +64,7 @@ def config_kwargs(name: str, extra: dict | None = None) -> dict:
 
 
 def _milestone(msg: str) -> None:
-    print(f"run_improve: {msg}", file=sys.stderr, flush=True)
+    print(f"bench: {msg}", file=sys.stderr, flush=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -126,7 +125,7 @@ def run_config(name: str, outdir: Path, threads: int, gold_fa, gold_truth,
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--outdir", default="bench/out/improve")
+    ap.add_argument("--outdir", default="bench/out/configs")
     ap.add_argument("--threads", type=int, default=20)
     ap.add_argument("--gold-fa", default="bench/out/gold_perturbed.fa")
     ap.add_argument("--gold-truth", default="bench/out/gold_truth.tsv")

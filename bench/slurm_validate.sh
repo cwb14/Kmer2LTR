@@ -1,19 +1,22 @@
 #!/bin/bash
-#SBATCH -A bio250178
+#SBATCH -A CHANGEME
 #SBATCH -p shared
 #SBATCH -n 20
 #SBATCH -t 02:00:00
-#SBATCH -J ltrk2p_impC
-#SBATCH -o bench/out/improve_c_%j.log
+#SBATCH -J ltrk2p_validate
+#SBATCH -o bench/out/validate_%j.log
 set -euo pipefail
-cd /anvil/projects/x-bio250178/chris/LTRRT6/ltrk2p
-PY=/anvil/projects/x-bio250178/conda/envs/ltrrt4/bin/python
-export PYTHONPATH=/anvil/projects/x-bio250178/chris/LTRRT6/ltrk2p/src
-D=/anvil/projects/x-bio250178/chris/LTRRT6
-O=bench/out/improve
+# Set REPO and DATA for your site, or export them before submitting.
+REPO=${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
+DATA=${DATA:-$(dirname "$REPO")}
+cd "$REPO"
+PY=${PY:-python}
+export PYTHONPATH="$REPO/src"
+D="$DATA"
+O=bench/out/configs
 mkdir -p "$O"
 
-# Job C: final validation of the SHIPPED defaults -- no flags, so every value
+# Final validation of the SHIPPED defaults -- no flags, so every value
 # comes from src/ltrk2p/align.py exactly as a user would get it.
 for f in arab_ltr_all_clean.fa.gz poa_ltr_all_clean.fa.gz human_ltr_all_clean.fa.gz \
          repbase.fa Dfam-RepeatMasker.lib MTEC/maizeTE04092026 riceTElib/rice7.0.0.liban; do
@@ -51,11 +54,11 @@ bash bench/out/_scratch6/verify_rowcounts.sh "$O"
 # accuracy proxies. Secondary evidence: the homology grid is the primary check
 # precisely because it needs no proxy at all.
 $PY bench/out/_scratch6/tgca_tsd_check.py "$(cat <<'JSON'
-[["/anvil/projects/x-bio250178/chris/LTRRT6/arab_ltr_all_clean.fa.gz","bench/out/improve/real_arab_ltr_all_clean.tsv","arabidopsis"],
- ["/anvil/projects/x-bio250178/chris/LTRRT6/human_ltr_all_clean.fa.gz","bench/out/improve/real_human_ltr_all_clean.tsv","human"],
- ["/anvil/projects/x-bio250178/chris/LTRRT6/poa_ltr_all_clean.fa.gz","bench/out/improve/real_poa_ltr_all_clean.tsv","poa"],
- ["/anvil/projects/x-bio250178/chris/LTRRT6/MTEC/maizeTE04092026","bench/out/improve/real_maizeTE04092026.tsv","mtec"]]
+[["$DATA"/arab_ltr_all_clean.fa.gz","bench/out/configs/real_arab_ltr_all_clean.tsv","arabidopsis"],
+ ["$DATA"/human_ltr_all_clean.fa.gz","bench/out/configs/real_human_ltr_all_clean.tsv","human"],
+ ["$DATA"/poa_ltr_all_clean.fa.gz","bench/out/configs/real_poa_ltr_all_clean.tsv","poa"],
+ ["$DATA"/MTEC/maizeTE04092026","bench/out/configs/real_maizeTE04092026.tsv","mtec"]]
 JSON
 )" "$O/tgca_tsd.json"
 
-echo "=== Job C complete: $(date) ==="
+echo "=== validation complete: $(date) ==="

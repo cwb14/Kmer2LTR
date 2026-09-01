@@ -1,13 +1,13 @@
 """Gold-subset selection and known-perturbation of real LTR-RT elements.
 
-Task 13's `simulate.py` builds elements from library CONSENSUS sequence. This
+`simulate.py` builds elements from library CONSENSUS sequence. This
 module instead starts from REAL elements the tool already resolves cleanly,
 applies a KNOWN perturbation (mutation and/or flank), and hands the result to
 `gold_robustness.py` to check whether the tool recovers the known-correct
 answer. Real sequence carries real composition bias and internal structure a
 simulator does not reproduce.
 
-Circularity note (binding -- see task-18-brief.md): `select_gold` filters on
+Circularity note (binding -- see docs/benchmarks.md): `select_gold` filters on
 the tool's OWN output, so a subset built here must never be used to argue
 "the tool calls boundaries correctly" -- that premise is exactly what is
 under test. It is valid only for the before/after question: given an element
@@ -32,9 +32,8 @@ from ltrk2p.align import classify      # noqa: E402
 from ltrk2p.fasta import read_fasta    # noqa: E402
 from bench.simulate import evolve, shuffle_dinuc  # noqa: E402
 
-# Indel rate used while perturbing gold LTRs. Matches bench.simulate's own
-# default (Task 13, `simulate_element`'s `indel_frac=0.10`) rather than
-# introducing a second, untested free parameter for this benchmark alone.
+# Indel rate used while perturbing gold LTRs. Matches `bench.simulate.simulate_element`'s own
+# default (`indel_frac=0.10`) rather than introducing a second, untested free parameter for this benchmark alone.
 INDEL_FRAC = 0.10
 
 
@@ -97,7 +96,7 @@ def gold_ltr_len(seq: str) -> int:
     (deterministic) boundary call.
 
     `perturb`'s signature (below) carries no boundary argument -- by design,
-    per task-18-brief.md's Interfaces block -- so it must locate the LTR/
+    so it must locate the LTR/
     internal split itself. Re-running `classify` on the untouched input is
     the only source of that split that cannot drift from what `select_gold`
     already required of it: `classify` is a pure function of `seq` (no
@@ -129,8 +128,8 @@ def perturb(seq: str, d: float, kappa: float, flank5: int, flank3: int, rng,
     A single ancestral copy of the element's own 5' LTR is evolved TWICE,
     independently, for a branch length of d/2 each (via `bench.simulate.
     evolve`, reused rather than reimplemented) -- exactly the construction
-    `bench.simulate.simulate_element` already uses and that Task 13 verified
-    lands within 10% of nominal out to d=0.7. Using one ancestor rather than
+    `bench.simulate.simulate_element` already uses which was verified to land
+    within 10% of nominal out to d=0.7. Using one ancestor rather than
     evolving the gold element's existing 5' and 3' copies independently from
     where they already sit matters: those two copies already differ by up to
     `max_k2p` (0.05 by default) from gold selection, so "evolve each one
