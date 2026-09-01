@@ -1,7 +1,7 @@
 import random
 import pytest
-from ltrk2p.align import classify
-from ltrk2p.fasta import sanitize
+from kmer2ltr.align import classify
+from kmer2ltr.fasta import sanitize
 
 def _rnd(n, seed):
     r = random.Random(seed)

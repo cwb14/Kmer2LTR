@@ -1,13 +1,13 @@
 """Named pipeline configurations, run over both benchmark grids and scored.
 
-Every candidate change is a keyword on `ltrk2p.align.classify`, so this module
+Every candidate change is a keyword on `kmer2ltr.align.classify`, so this module
 is pure orchestration: it names configurations, runs each over both benchmark
 grids, and scores them. No tool behaviour lives here.
 
 The two grids answer different questions and are both reported:
 
   * `bench/out/gold_perturbed.fa` -- 260,876 records, real gold elements under
-    known perturbation. Continuity with every prior ltrk2p measurement, but
+    known perturbation. Continuity with every prior Kmer2LTR measurement, but
     motif-filtered and tool-selected (see `gold_subset.py`'s circularity note).
   * `bench/out/homology_grid.fa` -- perfect library-consensus elements under
     known substitutions, flanks and indels, with an EXACT true alignment. No
@@ -28,7 +28,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from ltrk2p.align import (GENERIC_MATRIX, SIG_GAPS, calibrate_full, discover,  # noqa: E402
+from kmer2ltr.align import (GENERIC_MATRIX, SIG_GAPS, calibrate_full, discover,  # noqa: E402
                           ltr_spans)
 from bench.homology_grid import score_homology  # noqa: E402
 from bench.homology_grid import cells_to_json as hom_cells_to_json  # noqa: E402

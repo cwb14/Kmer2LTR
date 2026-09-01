@@ -1,4 +1,4 @@
-"""mmseqs2 clustering of the per-element sequences ltrk2p derives.
+"""mmseqs2 clustering of the per-element sequences Kmer2LTR derives.
 
 Clustering consensus LTRs groups elements into families; clustering internal
 regions is a mostly independent check on that grouping. Both run the same
@@ -54,7 +54,7 @@ def cluster(fasta, threads: int = 1, min_seq_id: float | None = None,
     """
     fasta = Path(fasta)
     if not fasta.exists() or fasta.stat().st_size == 0:
-        print(f"ltrk2p: warning: nothing to cluster in {fasta}", file=sys.stderr)
+        print(f"Kmer2LTR: warning: nothing to cluster in {fasta}", file=sys.stderr)
         return []
 
     written: list[Path] = []
@@ -79,7 +79,7 @@ def cluster(fasta, threads: int = 1, min_seq_id: float | None = None,
                            stdout=None if verbose else subprocess.DEVNULL,
                            stderr=None if verbose else subprocess.DEVNULL)
         except subprocess.CalledProcessError as exc:
-            print(f"ltrk2p: warning: mmseqs failed at --min-seq-id {tag} "
+            print(f"Kmer2LTR: warning: mmseqs failed at --min-seq-id {tag} "
                   f"(exit {exc.returncode}); continuing", file=sys.stderr)
             continue
         finally:
@@ -90,5 +90,5 @@ def cluster(fasta, threads: int = 1, min_seq_id: float | None = None,
         if tsv.exists():
             written.append(tsv)
         else:
-            print(f"ltrk2p: warning: mmseqs wrote no {tsv.name}", file=sys.stderr)
+            print(f"Kmer2LTR: warning: mmseqs wrote no {tsv.name}", file=sys.stderr)
     return written

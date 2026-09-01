@@ -104,7 +104,7 @@ def shift_locus(seq_id: str, trim5: int, trim3: int) -> str:
 
     Everything around the locus -- a RepeatMasker-style class tag, a
     `bedtools`-style name prefix -- is carried through untouched. Headers with
-    no parseable locus are returned unchanged: this is the one place in ltrk2p
+    no parseable locus are returned unchanged: this is the one place in Kmer2LTR
     that reads a header as anything but an opaque id, and it declines rather
     than guesses.
     """
@@ -258,7 +258,7 @@ class ExtraWriter:
         # cannot be joined back to one element -- so say so once.
         if not self._warned:
             if extras.seq_id in self._seen:
-                print(f"ltrk2p: warning: duplicate record id {extras.seq_id!r} in the "
+                print(f"Kmer2LTR: warning: duplicate record id {extras.seq_id!r} in the "
                       f"auxiliary FASTA output; ids there are not unique",
                       file=sys.stderr)
                 self._warned = True

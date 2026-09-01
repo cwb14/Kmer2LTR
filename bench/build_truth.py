@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from ltrk2p.fasta import read_fasta   # noqa: E402
+from kmer2ltr.fasta import read_fasta   # noqa: E402
 
 _LTR_SUFFIX = re.compile(r"^(?P<fam>.+?)[-_]LTR(?P<tail>_.*)?$", re.IGNORECASE)
 _INT_SUFFIX = re.compile(r"^(?P<fam>.+?)[-_](?:I|INT)(?P<tail>_.*)?$", re.IGNORECASE)
@@ -104,7 +104,7 @@ def _records_with_header(path):
     one record at a time -- repbase.fa is 369 MB.
     """
     import gzip
-    from ltrk2p.fasta import sanitize
+    from kmer2ltr.fasta import sanitize
     opener = gzip.open if str(path).endswith(".gz") else open
     header, chunks = None, []
     with opener(path, "rt") as fh:

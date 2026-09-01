@@ -1,4 +1,4 @@
-name: ltrk2p
+name: kmer2ltr
 channels:
   - conda-forge
   - bioconda

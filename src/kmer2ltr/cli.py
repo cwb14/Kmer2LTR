@@ -16,7 +16,7 @@ _SWEEP = f"{cluster.SWEEP[0]:.2f}-{cluster.SWEEP[-1]:.2f}"
 
 def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="ltrk2p",
+        prog="Kmer2LTR",
         description="Classify LTR-RT boundaries and report K2P divergence between the LTRs.",
     )
     p.add_argument("input", help="multi-FASTA of putative intact LTR-RTs (.fa or .fa.gz)")
@@ -147,7 +147,7 @@ def _cluster_and_report(fasta, args, drop: bool) -> bool:
         # over a gapped set reads as a full sweep of identities that did not run.
         listed = (f"{tsvs[0].name} .. {tsvs[-1].name}" if complete and len(tsvs) > 1
                   else ", ".join(t.name for t in tsvs))
-        print(f"ltrk2p: wrote {len(tsvs)}/{wanted} cluster table(s): {listed}",
+        print(f"Kmer2LTR: wrote {len(tsvs)}/{wanted} cluster table(s): {listed}",
               file=sys.stderr)
     if drop and complete:
         Path(fasta).unlink(missing_ok=True)
@@ -155,7 +155,7 @@ def _cluster_and_report(fasta, args, drop: bool) -> bool:
         # Keep the input to a step that did not finish: it is the expensive half
         # of the run, and re-deriving it means re-aligning everything. Dropping
         # it here would make the missing identities unrecoverable.
-        print(f"ltrk2p: kept {fasta} (clustering did not complete)", file=sys.stderr)
+        print(f"Kmer2LTR: kept {fasta} (clustering did not complete)", file=sys.stderr)
     return complete
 
 
@@ -166,7 +166,7 @@ def main(argv: list[str] | None = None) -> int:
                      perfect=tuple(args.perfect_ltr_rt or ()))
     err = _validate(args, spec)
     if err:
-        print(f"ltrk2p: error: {err}", file=sys.stderr)
+        print(f"Kmer2LTR: error: {err}", file=sys.stderr)
         return 2
 
     # Thread tuning values explicitly. Assigning align.T_BITS / align.W0 would
@@ -183,7 +183,7 @@ def main(argv: list[str] | None = None) -> int:
     skip, has_header = 0, False
     if args.resume:
         if args.output == "-":
-            print("ltrk2p: error: --resume requires -o/--output", file=sys.stderr)
+            print("Kmer2LTR: error: --resume requires -o/--output", file=sys.stderr)
             return 2
         skip, keep_bytes, has_header = scan_output(args.output)
         # Drop any partial final line before appending. A run killed mid-write
@@ -193,7 +193,7 @@ def main(argv: list[str] | None = None) -> int:
         if has_header and Path(args.output).stat().st_size != keep_bytes:
             with open(args.output, "r+b") as fh:
                 fh.truncate(keep_bytes)
-            print(f"ltrk2p: discarded a partial final line before resuming",
+            print(f"Kmer2LTR: discarded a partial final line before resuming",
                   file=sys.stderr)
         if args.verbose:
             print(f"resuming: {skip} records already done", file=sys.stderr)
@@ -202,7 +202,7 @@ def main(argv: list[str] | None = None) -> int:
     base = _base(args.output) if args.output != "-" else ""
     writer = ExtraWriter(base, spec) if spec else None
     t0 = time.time()
-    print(f"ltrk2p: reading {inp}", file=sys.stderr)
+    print(f"Kmer2LTR: reading {inp}", file=sys.stderr)
     try:
         if args.output == "-":
             n = run(inp, sys.stdout, args.threads, args.cs, skip, args.verbose,
@@ -222,18 +222,18 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         if writer is not None:
             writer.close()
-    print(f"ltrk2p: {n} records in {time.time() - t0:.1f}s", file=sys.stderr)
+    print(f"Kmer2LTR: {n} records in {time.time() - t0:.1f}s", file=sys.stderr)
 
     rc = 0
     if writer is not None:
         for key, path in sorted(writer.paths.items()):
-            print(f"ltrk2p: wrote {path} ({writer.counts[key]} records)", file=sys.stderr)
+            print(f"Kmer2LTR: wrote {path} ({writer.counts[key]} records)", file=sys.stderr)
         for flag, key, drop in ((args.ltr_cluster, "consensus", False),
                                 (args.internal_cluster, "internal", True)):
             if not flag:
                 continue
             if key not in writer.paths:
-                print(f"ltrk2p: warning: no {key} sequence to cluster", file=sys.stderr)
+                print(f"Kmer2LTR: warning: no {key} sequence to cluster", file=sys.stderr)
                 rc = 1
             elif not _cluster_and_report(writer.paths[key], args, drop=drop):
                 # A clustering that did not finish must be visible to `$?`, or a
@@ -243,5 +243,5 @@ def main(argv: list[str] | None = None) -> int:
         from .plot import density_plot
         pdf = f"{base}.density.pdf"
         if density_plot(args.output, pdf, args.mutation_rate):
-            print(f"ltrk2p: wrote {pdf}", file=sys.stderr)
+            print(f"Kmer2LTR: wrote {pdf}", file=sys.stderr)
     return rc

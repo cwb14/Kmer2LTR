@@ -12,7 +12,7 @@ This module's primary source is instead `bench/out/truth.fa`: library
 `X-LTR` + `X-I` + `X-LTR` concatenations built by `bench/build_truth.py`. Those
 elements are **perfect by construction** -- the two LTR copies are literally the
 same string, so their divergence is exactly zero and their boundaries are known
-exactly -- and selecting them involves no motif, no TSD and no call by ltrk2p.
+exactly -- and selecting them involves no motif, no TSD and no call by Kmer2LTR.
 Everything the benchmark then measures is a deviation the harness itself
 introduced.
 
@@ -49,9 +49,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from ltrk2p.fasta import read_fasta            # noqa: E402
-from ltrk2p.k2p import count_substitutions, k2p_distance   # noqa: E402
-from ltrk2p.scoring import k2p_probs           # noqa: E402
+from kmer2ltr.fasta import read_fasta            # noqa: E402
+from kmer2ltr.k2p import count_substitutions, k2p_distance   # noqa: E402
+from kmer2ltr.scoring import k2p_probs           # noqa: E402
 
 _TI = {"A": "G", "G": "A", "C": "T", "T": "C"}
 _TV = {"A": "CT", "G": "CT", "C": "AG", "T": "AG"}
@@ -235,7 +235,7 @@ def load_library_elements(truth_fa, truth_tsv, n: int, seed: int,
 
     Joined by RECORD ORDER, the convention every other module here uses: the
     two files are written together and `elem_id` is not guaranteed unique.
-    Selection is by length only -- no motif, no TSD, no call by ltrk2p.
+    Selection is by length only -- no motif, no TSD, no call by Kmer2LTR.
     """
     pool = []
     with open(truth_tsv, newline="") as tf:
@@ -346,7 +346,7 @@ def build_grid(sources: dict[str, list], out_fa, out_truth, seed: int,
 
 
 def _fmt(v) -> str:
-    """`+ 0.0` normalises negative zero, matching ltrk2p.runner.format_row."""
+    """`+ 0.0` normalises negative zero, matching kmer2ltr.runner.format_row."""
     return "NA" if v is None else (f"{v + 0.0:.6g}" if isinstance(v, float) else str(v))
 
 

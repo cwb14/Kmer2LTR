@@ -1,6 +1,6 @@
 import math, random
 import pytest
-from ltrk2p.k2p import count_substitutions, k2p_distance
+from kmer2ltr.k2p import count_substitutions, k2p_distance
 
 def _reference_k80(a, b):
     """Independent K80 implementation, written from the 1980 paper formulas

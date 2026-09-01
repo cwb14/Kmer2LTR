@@ -1,7 +1,7 @@
 import random
 import pytest
-from ltrk2p.align import discover, calibrate, terminal_snap, T_BITS
-from ltrk2p.scoring import GENERIC_MATRIX
+from kmer2ltr.align import discover, calibrate, terminal_snap, T_BITS
+from kmer2ltr.scoring import GENERIC_MATRIX
 
 def _rnd(n, seed):
     r = random.Random(seed)

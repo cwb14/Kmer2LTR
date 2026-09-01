@@ -1,7 +1,7 @@
 import io, random, gzip
 import pytest
-from ltrk2p.runner import COLUMNS, format_row, run, count_data_lines
-from ltrk2p.align import classify
+from kmer2ltr.runner import COLUMNS, format_row, run, count_data_lines
+from kmer2ltr.align import classify
 
 def _rnd(n, seed):
     r = random.Random(seed)
@@ -110,7 +110,7 @@ def test_parallel_path_streams_and_does_not_materialise_input(tmp_path):
     """ProcessPoolExecutor.map drains its input generator entirely before
     returning, which read the whole FASTA into memory. Bounded submission must
     consume the input incrementally."""
-    import ltrk2p.runner as R
+    import kmer2ltr.runner as R
     ltr = _rnd(200, 2)
     p = _fasta(tmp_path, [(f"r{i}", ltr + _rnd(300, i) + ltr) for i in range(60)])
     orig = R.read_fasta
@@ -157,7 +157,7 @@ def test_the_tsv_is_unchanged_by_asking_for_auxiliary_output(tmp_path):
     """The extras path reads the raw sequence and runs `_classify` instead of
     `classify`. Neither may perturb a single byte of the table -- otherwise a
     run with `--ltr-cluster` would not be comparable to one without."""
-    from ltrk2p.extras import ExtraSpec, ExtraWriter
+    from kmer2ltr.extras import ExtraSpec, ExtraWriter
     inp = _fasta(tmp_path, _elements(6))
     plain = io.StringIO()
     run(inp, plain, threads=1)
@@ -169,7 +169,7 @@ def test_the_tsv_is_unchanged_by_asking_for_auxiliary_output(tmp_path):
 
 
 def test_auxiliary_records_stay_in_input_order_across_thread_counts(tmp_path):
-    from ltrk2p.extras import ExtraSpec, ExtraWriter
+    from kmer2ltr.extras import ExtraSpec, ExtraWriter
     inp = _fasta(tmp_path, _elements(12))
     seen = []
     for threads in (1, 4):
@@ -185,7 +185,7 @@ def test_auxiliary_records_stay_in_input_order_across_thread_counts(tmp_path):
 
 
 def test_auxiliary_streams_only_receive_passing_records(tmp_path):
-    from ltrk2p.extras import ExtraSpec, ExtraWriter
+    from kmer2ltr.extras import ExtraSpec, ExtraWriter
     good = _elements(3)
     records = good + [("junk", _rnd(2000, 90)), ("tiny", "ACGT" * 10)]
     inp = _fasta(tmp_path, records)
@@ -202,7 +202,7 @@ def test_scan_output_counts_only_newline_terminated_lines(tmp_path):
     """A run killed mid-write leaves a partial final line. Counting it as
     complete makes --resume skip a record that was never written, and the
     returned offset is what lets the caller truncate the fragment away."""
-    from ltrk2p.runner import scan_output, count_data_lines
+    from kmer2ltr.runner import scan_output, count_data_lines
     cases = {
         "missing.tsv": None,
         "empty.tsv": "",

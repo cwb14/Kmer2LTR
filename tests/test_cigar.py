@@ -1,5 +1,5 @@
 import pytest
-from ltrk2p.cigar import aligned_pair_from_cigartuples, extended_cigar, cs_string
+from kmer2ltr.cigar import aligned_pair_from_cigartuples, extended_cigar, cs_string
 
 def test_extended_cigar_uses_eq_and_X_not_M():
     a = "ACGTACGT"
@@ -59,7 +59,7 @@ def test_pywfa_real_orientation_is_query_first():
     """Guard: pywfa's pattern is the query, text is the ref. If a pywfa
     upgrade flips this, I/D orientation silently inverts -- catch it here."""
     from pywfa import WavefrontAligner
-    from ltrk2p.cigar import aligned_pair_from_cigartuples, extended_cigar
+    from kmer2ltr.cigar import aligned_pair_from_cigartuples, extended_cigar
     query = "ACGTAACGT"   # one extra A relative to ref
     ref = "ACGTACGT"
     al = WavefrontAligner(query, scope="full", span="end-to-end")

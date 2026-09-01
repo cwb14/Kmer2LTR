@@ -2,7 +2,7 @@
 import random
 import pytest
 from bench.simulate import evolve, shuffle_dinuc, simulate_element
-from ltrk2p.k2p import count_substitutions, k2p_distance
+from kmer2ltr.k2p import count_substitutions, k2p_distance
 
 def _rnd(n, seed):
     r = random.Random(seed)
@@ -32,7 +32,7 @@ def test_evolve_produces_target_divergence():
 
 def test_evolve_matches_exact_k2p_transition_probabilities():
     """The per-site outcome distribution must match k2p_probs exactly."""
-    from ltrk2p.scoring import k2p_probs
+    from kmer2ltr.scoring import k2p_probs
     anc = "A" * 40000
     d, kappa = 0.4, 2.0
     out = evolve(anc, d, kappa, 0.0, random.Random(11))

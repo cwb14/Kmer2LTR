@@ -3,7 +3,7 @@
 #SBATCH -p shared
 #SBATCH -n 20
 #SBATCH -t 02:00:00
-#SBATCH -J ltrk2p_ablations
+#SBATCH -J Kmer2LTR_ablations
 #SBATCH -o bench/out/ablations_%j.log
 set -euo pipefail
 # Set REPO and DATA for your site, or export them before submitting.
@@ -16,7 +16,7 @@ export PYTHONPATH="$REPO/src"
 
 # One knob at a time from an explicit baseline, over both
 # grids -- the 260,876-record gold-perturbed grid (continuity with every prior
-# ltrk2p measurement) and the 70,000-record homology grid (perfect elements,
+# Kmer2LTR measurement) and the 70,000-record homology grid (perfect elements,
 # known mutations/flanks/indels, exact true alignment, no motif or TSD prior).
 #
 # The t_bits sweep is run here rather than reusing an earlier one: that sweep was

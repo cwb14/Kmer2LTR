@@ -7,13 +7,13 @@ output), but it CAN show whether a known perturbation of an already-clean
 call breaks the tool, and whether the known-correct answer comes back.
 
 Pipeline, per dataset:
-  1. run ltrk2p on the raw real FASTA -> pred.tsv (for gold selection only).
+  1. run Kmer2LTR on the raw real FASTA -> pred.tsv (for gold selection only).
   2. select_gold(pred.tsv, fasta) -> gold elements; cap to --max-gold.
   3. perturb every gold element over the full grid
      d in {0, .05, .1, .2, .3, .4, .5} x flank in {0,1,2,3,5,10,20,50,100,200,500}
      x flank_source in {other, shuffle}
      -> one combined perturbed FASTA + truth TSV across all datasets.
-  4. run ltrk2p on the perturbed FASTA -> pred.tsv.
+  4. run Kmer2LTR on the perturbed FASTA -> pred.tsv.
   5. score_gold joins prediction to truth and produces the three headline
      tables: false-flank rate at flank=0 by divergence, flank-detection rate
      by flank length, K2P bias vs known d.
@@ -52,19 +52,19 @@ TRUTH_COLUMNS = ["seq_id", "dataset", "orig_id", "d_nominal", "flank5", "flank3"
 # Gold selection
 # --------------------------------------------------------------------------- #
 
-def run_ltrk2p(fasta_path, out_tsv, threads: int, python: str = sys.executable,
+def run_kmer2ltr(fasta_path, out_tsv, threads: int, python: str = sys.executable,
                verbose: bool = False) -> float:
-    """Invoke the production CLI exactly as a user would: `python -m ltrk2p
+    """Invoke the production CLI exactly as a user would: `python -m kmer2ltr
     INPUT -o OUT -t N`. Subprocess, not an in-process `classify()` call --
     this measures the shipped entry point, process pool included."""
     t0 = time.time()
-    cmd = [python, "-m", "ltrk2p", str(fasta_path), "-o", str(out_tsv), "-t", str(threads)]
+    cmd = [python, "-m", "kmer2ltr", str(fasta_path), "-o", str(out_tsv), "-t", str(threads)]
     if verbose:
         print(f"  $ {' '.join(cmd)}", file=sys.stderr)
     subprocess.run(cmd, check=True)
     dt = time.time() - t0
     if verbose:
-        print(f"  ltrk2p finished in {dt:.1f}s -> {out_tsv}", file=sys.stderr)
+        print(f"  Kmer2LTR finished in {dt:.1f}s -> {out_tsv}", file=sys.stderr)
     return dt
 
 
@@ -338,31 +338,31 @@ def main(argv=None) -> int:
 
     gold: dict[str, list[tuple[str, str]]] = {}
     for name, path in ds_paths.items():
-        print(f"ltrk2p-bench: [{name}] classifying raw input for gold selection", file=sys.stderr)
+        print(f"Kmer2LTR-bench: [{name}] classifying raw input for gold selection", file=sys.stderr)
         raw_pred = outdir / f"gold_raw_pred_{name}.tsv"
-        run_ltrk2p(path, raw_pred, args.threads, verbose=args.verbose)
+        run_kmer2ltr(path, raw_pred, args.threads, verbose=args.verbose)
         g = load_gold(path, raw_pred, args.max_gold, args.seed,
                       min_bitscore=args.min_bitscore, max_k2p=args.max_k2p,
                       require_motif=not args.no_motif, verbose=True)
         gold[name] = g
-        print(f"ltrk2p-bench: [{name}] gold subset = {len(g)} elements", file=sys.stderr)
+        print(f"Kmer2LTR-bench: [{name}] gold subset = {len(g)} elements", file=sys.stderr)
 
     perturbed_fa = outdir / "gold_perturbed.fa"
     truth_tsv = outdir / "gold_truth.tsv"
-    print("ltrk2p-bench: building perturbation grid "
+    print("Kmer2LTR-bench: building perturbation grid "
           f"({len(D_GRID)} d x {len(FLANK_GRID)} flank x {len(SOURCE_GRID)} source = "
           f"{len(D_GRID) * len(FLANK_GRID) * len(SOURCE_GRID)} cells/element)", file=sys.stderr)
     n_records = build_perturbed_grid(gold, perturbed_fa, truth_tsv, args.seed,
                                       kappa=args.kappa, verbose=True)
-    print(f"ltrk2p-bench: wrote {n_records} perturbed records", file=sys.stderr)
+    print(f"Kmer2LTR-bench: wrote {n_records} perturbed records", file=sys.stderr)
 
     pred_tsv = outdir / "gold_pred.tsv"
-    print("ltrk2p-bench: classifying perturbed grid", file=sys.stderr)
-    dt = run_ltrk2p(perturbed_fa, pred_tsv, args.threads, verbose=True)
-    print(f"ltrk2p-bench: perturbed-grid classification: {n_records} records in {dt:.1f}s "
+    print("Kmer2LTR-bench: classifying perturbed grid", file=sys.stderr)
+    dt = run_kmer2ltr(perturbed_fa, pred_tsv, args.threads, verbose=True)
+    print(f"Kmer2LTR-bench: perturbed-grid classification: {n_records} records in {dt:.1f}s "
           f"({n_records / dt:.0f}/s)", file=sys.stderr)
 
-    print("ltrk2p-bench: scoring", file=sys.stderr)
+    print("Kmer2LTR-bench: scoring", file=sys.stderr)
     scores = score_gold(pred_tsv, truth_tsv)
     tables = render_tables(scores, list(gold.keys()))
     (outdir / "gold_headline_tables.md").write_text(tables)

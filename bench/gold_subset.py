@@ -28,8 +28,8 @@ from typing import Callable, Iterator
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from ltrk2p.align import classify      # noqa: E402
-from ltrk2p.fasta import read_fasta    # noqa: E402
+from kmer2ltr.align import classify      # noqa: E402
+from kmer2ltr.fasta import read_fasta    # noqa: E402
 from bench.simulate import evolve, shuffle_dinuc  # noqa: E402
 
 # Indel rate used while perturbing gold LTRs. Matches `bench.simulate.simulate_element`'s own

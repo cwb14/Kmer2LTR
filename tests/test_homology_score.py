@@ -6,7 +6,7 @@ import pytest
 
 from bench.homology_grid import (TRUTH_COLUMNS, cells_from_json, cells_to_json,
                                  dhat_bin, score_homology)
-from ltrk2p.runner import COLUMNS
+from kmer2ltr.runner import COLUMNS
 
 
 def _truth_row(**kw):

@@ -53,7 +53,7 @@ GAP_OPEN = SIG_GAP_OPEN
 GAP_EXTEND = SIG_GAP_EXTEND
 
 # Static alignment gap schemes, in BITS. "legacy" is what every published
-# ltrk2p measurement to date was made under. "static" raises the opening cost
+# Kmer2LTR measurement to date was made under. "static" raises the opening cost
 # and drops the extension cost, which is the shape an affine approximation to a
 # geometric indel-length model actually takes: opening is rare (~1e-3/site ->
 # ~10 bits) while continuing is common (mean length ~3 -> ~0.6 bits).

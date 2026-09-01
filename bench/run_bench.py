@@ -17,7 +17,7 @@ same `ablate()`, the gold-data ablation grid.
 
 Everything here is orchestration: every ablation "mechanism" listed
 (fixed matrix, no_stage3, no_stage4, wfa_vs_matrix, trim_K) is ALREADY a
-keyword-only knob on `ltrk2p.align.classify` on `ltrk2p.align.classify`. Nothing in `ltrk2p/` is modified by this
+keyword-only knob on `kmer2ltr.align.classify` on `kmer2ltr.align.classify`. Nothing in `kmer2ltr/` is modified by this
 module or by running it.
 """
 from __future__ import annotations
@@ -40,17 +40,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import parasail  # noqa: E402
 
-from ltrk2p.align import calibrate, classify, discover  # noqa: E402
-from ltrk2p.fasta import read_fasta  # noqa: E402
-from ltrk2p.runner import COLUMNS, format_row  # noqa: E402
-from ltrk2p.runner import run as run_classify  # noqa: E402
-from ltrk2p.scoring import ALPHABET, GENERIC_MATRIX, SCALE  # noqa: E402
+from kmer2ltr.align import calibrate, classify, discover  # noqa: E402
+from kmer2ltr.fasta import read_fasta  # noqa: E402
+from kmer2ltr.runner import COLUMNS, format_row  # noqa: E402
+from kmer2ltr.runner import run as run_classify  # noqa: E402
+from kmer2ltr.scoring import ALPHABET, GENERIC_MATRIX, SCALE  # noqa: E402
 from bench.simulate import simulate_element  # noqa: E402
 from bench.gold_robustness import D_GRID, FLANK_GRID, SOURCE_GRID  # noqa: E402,F401
 
 
 def _fmt(v) -> str:
-    """None -> "NA", matching ltrk2p.runner.format_row's convention everywhere
+    """None -> "NA", matching kmer2ltr.runner.format_row's convention everywhere
     a truth/prediction TSV in this module can carry an undefined value."""
     return "NA" if v is None else str(v)
 
@@ -138,7 +138,7 @@ def make_dataset(truth_fa, truth_tsv, out_fa, out_truth_tsv, ds, kappas, flanks,
 # =========================================================================== #
 
 def score_run(pred_tsv, truth_tsv) -> dict:
-    """Score a prediction TSV (full `ltrk2p` Result schema, e.g. `ablate`'s or
+    """Score a prediction TSV (full `Kmer2LTR` Result schema, e.g. `ablate`'s or
     `run_classify`'s output) against a truth TSV in the schema `make_dataset`
     writes: `elem_id ltr5_start ltr5_end ltr3_start ltr3_end d_nominal
     realized_k2p flank5 flank3` (extra columns are ignored).
@@ -245,7 +245,7 @@ def _parallel_map(fasta_path, work_fn, threads: int, *extra_args):
 
     Bounded ProcessPoolExecutor submission (never Executor.map: it drains the
     whole input generator before dispatching a single task, which would
-    materialise all of `fasta_path` in the parent -- see `ltrk2p/runner.py`'s
+    materialise all of `fasta_path` in the parent -- see `kmer2ltr/runner.py`'s
     own docstring for the measured RSS cost of that). `work_fn` must be a
     module-level function (picklable by reference); `extra_args` must be
     picklable values only -- this is what keeps a non-picklable
@@ -295,8 +295,8 @@ ABLATIONS: dict[str, dict] = {
 
 
 def _build_fixed_matrix(match: int, mismatch: int) -> "parasail.Matrix":
-    """A flat +match/-mismatch matrix at ltrk2p's SCALE, N=0 both directions
-    -- the same construction as `ltrk2p.scoring._generic`, parameterised."""
+    """A flat +match/-mismatch matrix at Kmer2LTR's SCALE, N=0 both directions
+    -- the same construction as `kmer2ltr.scoring._generic`, parameterised."""
     m = parasail.matrix_create(ALPHABET, 0, 0)
     for i in range(4):
         for j in range(4):
@@ -345,7 +345,7 @@ def ablate(name: str, fasta_path, out_tsv, *, threads: int = 1, cs: bool = False
     """Run classify() over every record of `fasta_path` under ablation
     configuration `name` (see ABLATIONS), writing one prediction row per
     record to `out_tsv` in the SAME column order and input order as
-    production `ltrk2p` output (`ltrk2p.runner.COLUMNS`) -- so `out_tsv`
+    production `Kmer2LTR` output (`kmer2ltr.runner.COLUMNS`) -- so `out_tsv`
     scores exactly like a normal run, with `score_run` / `score_gold_grid`.
 
     `overrides` layers extra classify() kwargs on top of `ABLATIONS[name]`
@@ -667,7 +667,7 @@ def _run_gold_analysis(gold_fa: Path, gold_truth: Path, outdir: Path, threads: i
     `bench/out/gold_pred.tsv` where it already corresponds to the requested
     configuration, instead of recomputing it.
     """
-    from ltrk2p.align import T_BITS as DEFAULT_T_BITS
+    from kmer2ltr.align import T_BITS as DEFAULT_T_BITS
 
     # Resolved relative to this file, not cwd: this is a cross-reference to
     # the one canonical output, independent of --outdir or where the

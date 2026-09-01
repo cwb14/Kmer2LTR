@@ -3,7 +3,7 @@
 #SBATCH -p shared
 #SBATCH -n 20
 #SBATCH -t 01:00:00
-#SBATCH -J ltrk2p_flankbeta
+#SBATCH -J Kmer2LTR_flankbeta
 #SBATCH -o bench/out/flankbeta_%j.log
 set -euo pipefail
 # Set REPO and DATA for your site, or export them before submitting.
@@ -19,7 +19,7 @@ import sys, time
 sys.path.insert(0, "bench"); sys.path.insert(0, "src")
 from bench.run_bench import ablate
 from bench.homology_grid import score_homology, cells_to_json
-import ltrk2p.align as A
+import kmer2ltr.align as A
 
 FA, TRUTH = "bench/out/homology_grid.fa", "bench/out/homology_truth.tsv"
 DHAT = "bench/out/configs/dhat_hom_candidate.tsv"

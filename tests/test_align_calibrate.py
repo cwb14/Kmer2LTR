@@ -1,8 +1,8 @@
 import random
 import numpy as np
 import pytest
-from ltrk2p.align import discover, calibrate, ltr_spans, core_alignment, MIN_CALIB_SITES
-from ltrk2p.scoring import GENERIC_MATRIX, SCALE
+from kmer2ltr.align import discover, calibrate, ltr_spans, core_alignment, MIN_CALIB_SITES
+from kmer2ltr.scoring import GENERIC_MATRIX, SCALE
 
 def _rnd(n, seed):
     r = random.Random(seed)

@@ -1,8 +1,8 @@
 import random, subprocess, sys
 import pytest
 from pathlib import Path
-from ltrk2p.cli import main
-from ltrk2p.runner import COLUMNS
+from kmer2ltr.cli import main
+from kmer2ltr.runner import COLUMNS
 
 PY = sys.executable
 
@@ -80,7 +80,7 @@ def test_missing_input_fails_fast_with_clear_message(tmp_path, capsys):
 
 def test_console_entry_point_installed(tmp_path):
     inp = _fa(tmp_path, n=2)
-    r = subprocess.run([PY, "-m", "ltrk2p", str(inp)], capture_output=True, text=True)
+    r = subprocess.run([PY, "-m", "kmer2ltr", str(inp)], capture_output=True, text=True)
     assert r.returncode == 0
     assert r.stdout.startswith("seq_id\t")
 
@@ -215,7 +215,7 @@ def test_ltr_cluster_keeps_the_consensus_and_internal_cluster_drops_its_fasta(tm
     """The cluster table names sequences that live only in the consensus FASTA,
     so that file is a result. The internal FASTA is scratch for a second
     opinion on the same grouping, so it is not."""
-    from ltrk2p import cluster
+    from kmer2ltr import cluster
     if not cluster.available():
         pytest.skip("mmseqs not on PATH")
     inp = _fa_flanked(tmp_path, n=5)
@@ -233,7 +233,7 @@ def test_ltr_cluster_keeps_the_consensus_and_internal_cluster_drops_its_fasta(tm
 
 
 def test_clustering_without_mmseqs_fails_before_doing_any_work(tmp_path, capsys, monkeypatch):
-    from ltrk2p import cluster
+    from kmer2ltr import cluster
     monkeypatch.setattr(cluster, "available", lambda: False)
     inp = _fa_flanked(tmp_path, n=1)
     out = tmp_path / "o.tsv"
@@ -332,7 +332,7 @@ def test_resume_discards_a_partial_final_line(tmp_path):
 
 def test_an_incomplete_clustering_is_visible_in_the_exit_code(tmp_path, monkeypatch):
     """Otherwise a shell pipeline carries on into tables that are not there."""
-    from ltrk2p import cluster
+    from kmer2ltr import cluster
     inp = _fa_flanked(tmp_path, n=3)
     monkeypatch.setattr(cluster, "available", lambda: True)
     monkeypatch.setattr(cluster, "cluster", lambda *a, **k: [])
@@ -342,7 +342,7 @@ def test_an_incomplete_clustering_is_visible_in_the_exit_code(tmp_path, monkeypa
 def test_the_internal_fasta_survives_an_incomplete_clustering(tmp_path, monkeypatch):
     """It is the expensive half of the run. Dropping it when some identities
     failed makes those tables unrecoverable without re-aligning everything."""
-    from ltrk2p import cluster
+    from kmer2ltr import cluster
     inp = _fa_flanked(tmp_path, n=3)
     monkeypatch.setattr(cluster, "available", lambda: True)
 

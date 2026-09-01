@@ -3,8 +3,8 @@ from dataclasses import replace
 
 import pytest
 
-from ltrk2p.align import _classify, classify
-from ltrk2p.extras import (ExtraSpec, ExtraWriter, build, fasta_record,
+from kmer2ltr.align import _classify, classify
+from kmer2ltr.extras import (ExtraSpec, ExtraWriter, build, fasta_record,
                            iupac_consensus, shift_locus)
 
 
@@ -101,7 +101,7 @@ def test_shift_locus_binds_the_last_colon_so_colons_in_chrom_names_survive():
     "chr1:abc-def",              # non-numeric
 ])
 def test_shift_locus_declines_rather_than_guesses(seq_id):
-    """This is the one place ltrk2p reads a header as anything but an opaque id.
+    """This is the one place Kmer2LTR reads a header as anything but an opaque id.
     A header it cannot parse exactly is returned untouched."""
     assert shift_locus(seq_id, 10, 10) == seq_id
 
@@ -296,7 +296,7 @@ def test_writer_closes_what_it_opened_when_a_later_stream_fails(tmp_path):
 def test_stream_paths_lists_every_file_the_writer_would_open(tmp_path):
     """The CLI checks this set against the input before anything is opened,
     so it must not drift from what __init__ actually opens."""
-    from ltrk2p.extras import stream_paths
+    from kmer2ltr.extras import stream_paths
     spec = ExtraSpec(consensus=True, internal=True, trimmed=True, perfect=("5p", "3p"))
     declared = stream_paths(str(tmp_path / "o"), spec)
     with ExtraWriter(str(tmp_path / "o"), spec) as w:

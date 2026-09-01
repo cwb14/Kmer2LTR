@@ -1,7 +1,7 @@
 import random
 import pytest
-from ltrk2p.align import discover, Hit, GAP_OPEN, GAP_EXTEND
-from ltrk2p.scoring import GENERIC_MATRIX
+from kmer2ltr.align import discover, Hit, GAP_OPEN, GAP_EXTEND
+from kmer2ltr.scoring import GENERIC_MATRIX
 
 def _rnd(n, seed=None):
     r = random.Random(seed)

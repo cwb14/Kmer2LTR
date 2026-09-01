@@ -3,7 +3,7 @@
 #SBATCH -p shared
 #SBATCH -n 20
 #SBATCH -t 08:00:00
-#SBATCH -J ltrk2p_bench
+#SBATCH -J Kmer2LTR_bench
 #SBATCH -o bench/out/bench_%j.log
 set -euo pipefail
 # Set REPO and DATA for your site, or export them before submitting.

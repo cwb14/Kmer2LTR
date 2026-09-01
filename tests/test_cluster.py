@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from ltrk2p import cluster
+from kmer2ltr import cluster
 
 _FASTA = ">a\nACGTACGTACGTACGTACGTACGTACGTACGT\n>b\nACGTACGTACGTACGTACGTACGTACGTACGA\n"
 

@@ -1,4 +1,4 @@
-# ltrk2p
+# Kmer2LTR
 
 Find the two LTRs in an LTR retrotransposon and report how far they have
 diverged.
@@ -8,7 +8,7 @@ row per input record: where each LTR starts and ends, the Kimura 2-parameter
 distance between them, and the alignment that produced it.
 
 ```bash
-ltrk2p elements.fa.gz -o elements.tsv -t 20
+Kmer2LTR elements.fa.gz -o elements.tsv -t 20
 ```
 
 ## What it assumes
@@ -44,7 +44,7 @@ Two things, and the second comes free with the first.
 
 ```bash
 mamba env create -f environment.yml
-mamba activate ltrk2p
+mamba activate kmer2ltr
 pip install -e .
 ```
 
@@ -56,7 +56,7 @@ clustering flags. Both are in `environment.yml`.
 ## Usage
 
 ```
-ltrk2p [-o OUT] [-u RATE] [--cs] [-t THREADS] [--resume] [-v] input.fa[.gz]
+Kmer2LTR [-o OUT] [-u RATE] [--cs] [-t THREADS] [--resume] [-v] input.fa[.gz]
 ```
 
 | flag | meaning |
@@ -98,11 +98,11 @@ element these outputs should be asserting things about.
 | `--plot` | `<out>.density.pdf` |
 | `--min-seq-id` | cluster at one identity instead of the 0.70–0.98 sweep |
 
-Chaining is safe: `ltrk2p` refuses to start if any output it is about to open
+Chaining is safe: `Kmer2LTR` refuses to start if any output it is about to open
 would land on the input file, rather than truncating the file it is about to
 read. Identities are used to two decimal places, and a finer `--min-seq-id` is
 refused rather than silently rounded. If a clustering does not produce every
-table you asked for, `ltrk2p` says so, keeps the internal FASTA it would
+table you asked for, `Kmer2LTR` says so, keeps the internal FASTA it would
 otherwise have deleted, and **exits non-zero** so a pipeline notices.
 
 **`--trim-flanks` gives you back your own input, corrected.** Structure-based
@@ -130,7 +130,7 @@ grid-searched on *Arabidopsis* against singleton count and family mixing:
 mmseqs beat cd-hit-est, and the consensus LTR beat both the full-length element
 and the 5' LTR alone as input.
 
-The consensus costs nothing. It is read straight off the alignment `ltrk2p`
+The consensus costs nothing. It is read straight off the alignment `Kmer2LTR`
 already made to measure K2P, so a consensus and the divergence beside it are two
 readings of one alignment and cannot disagree.
 
@@ -149,7 +149,7 @@ cannot say where they stopped.
 
 One caveat on duplicate record IDs. The TSV is positional, so duplicates there
 are harmless — but these files are keyed by ID, and a cluster table naming a
-duplicated ID cannot be joined back to one element. `ltrk2p` warns once on
+duplicated ID cannot be joined back to one element. `Kmer2LTR` warns once on
 stderr if that happens.
 
 ### Advanced flags

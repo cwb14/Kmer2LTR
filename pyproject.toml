@@ -3,7 +3,7 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "ltrk2p"
+name = "Kmer2LTR"
 version = "0.1.0"
 description = "Locate the LTR pair in an LTR retrotransposon and measure its K2P divergence"
 readme = "README.md"
@@ -24,7 +24,7 @@ dependencies = ["parasail", "pywfa", "numpy"]
 plot = ["matplotlib"]
 
 [project.scripts]
-ltrk2p = "ltrk2p.cli:main"
+Kmer2LTR = "kmer2ltr.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

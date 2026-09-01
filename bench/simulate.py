@@ -6,8 +6,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from ltrk2p.k2p import count_substitutions, k2p_distance   # noqa: E402
-from ltrk2p.scoring import k2p_probs                       # noqa: E402
+from kmer2ltr.k2p import count_substitutions, k2p_distance   # noqa: E402
+from kmer2ltr.scoring import k2p_probs                       # noqa: E402
 
 _TI = {"A": "G", "G": "A", "C": "T", "T": "C"}
 _TV = {"A": "CT", "G": "CT", "C": "AG", "T": "AG"}

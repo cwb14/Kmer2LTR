@@ -3,7 +3,7 @@
 #SBATCH -p shared
 #SBATCH -n 20
 #SBATCH -t 02:00:00
-#SBATCH -J ltrk2p_tsweep
+#SBATCH -J Kmer2LTR_tsweep
 #SBATCH -o bench/out/tsweep_%j.log
 set -euo pipefail
 # Set REPO and DATA for your site, or export them before submitting.

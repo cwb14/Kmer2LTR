@@ -3,11 +3,11 @@
 #SBATCH -p shared
 #SBATCH -n 20
 #SBATCH -t 01:00:00
-#SBATCH -J ltrk2p_gold
+#SBATCH -J Kmer2LTR_gold
 #SBATCH -o bench/out/gold_robustness_%j.log
 set -euo pipefail
 PY=${PY:-python}
-cd "$DATA"/ltrk2p
+cd "$DATA"/Kmer2LTR
 
 # arabidopsis + truth.fa + human. poa (75,180 records, ~15 ms/record) is skipped
 # deliberately: the other three already exercise both dataset families the

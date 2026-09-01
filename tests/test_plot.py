@@ -3,9 +3,9 @@ import random
 import numpy as np
 import pytest
 
-from ltrk2p.k2p import insertion_time
-from ltrk2p.plot import _kde, density_plot, myr_per_unit_k2p, read_k2p
-from ltrk2p.runner import COLUMNS
+from kmer2ltr.k2p import insertion_time
+from kmer2ltr.plot import _kde, density_plot, myr_per_unit_k2p, read_k2p
+from kmer2ltr.runner import COLUMNS
 
 matplotlib = pytest.importorskip("matplotlib")
 

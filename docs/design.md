@@ -1,4 +1,4 @@
-# ltrk2p — LTR boundary classification and K2P divergence
+# Kmer2LTR — LTR boundary classification and K2P divergence
 
 **Date:** 2026-08-28
 **Status:** implemented; defaults set from benchmark evidence
@@ -330,7 +330,7 @@ a 2.5-3.6x reduction across the range, while large-flank detection — the pract
 important failure mode, catching genuine overextension — is nearly unchanged: det@50 falls
 93.0% -> 91.3% (1.7 points) and det@100 barely moves, 91.7% -> 91.6%. The cost concentrates
 entirely on 10-20 bp flanks (det@10 75.5% -> 39.4%, det@20 88.8% -> 70.5%), which section 7
-already documents as sitting near the theoretical detection floor. **`T_BITS = 10.0` is the fixed fallback** (`src/ltrk2p/align.py`), used whenever no
+already documents as sitting near the theoretical detection floor. **`T_BITS = 10.0` is the fixed fallback** (`src/kmer2ltr/align.py`), used whenever no
 per-element divergence estimate is available; `--flank-bits` pins it.
 
 **Caution on the sweep above: it was measured at `MAX_EVALUE = 1e-3`,** while the tool
@@ -689,9 +689,9 @@ honest response, not because it is expected to fire.
 ## 5. Package
 
 ```
-ltrk2p/
+Kmer2LTR/
 ├── pyproject.toml, environment.yml, README.md, LICENSE
-├── src/ltrk2p/
+├── src/kmer2ltr/
 │   ├── cli.py argparse entry point
 │   ├── fasta.py streaming gzip-aware reader, sanitisation
 │   ├── scoring.py calibrated log-odds matrix, bit scores
@@ -706,7 +706,7 @@ ltrk2p/
 └── bench/          build_truth · simulate · run_bench · figures
 ```
 
-**CLI:** `ltrk2p [-o OUT] [-u RATE] [--cs] [-t 20] [--resume] [-v] input.fa[.gz]`
+**CLI:** `Kmer2LTR [-o OUT] [-u RATE] [--cs] [-t 20] [--resume] [-v] input.fa[.gz]`
 
 **The optional outputs are re-implementations, not ports.** The consensus LTR in particular
 is free here: `classify` already holds the exact WFA global alignment of the final pair, so
@@ -794,7 +794,7 @@ second smuggles in a structural prior the tool itself declines to use.
 from `truth.fa`'s `X-LTR` + `X-I` + `X-LTR` constructions, which are **perfect by
 construction** — the two LTR copies are literally the same string, so divergence is
 exactly zero and boundaries exactly known — and are selected on length alone: no motif,
-no TSD, no call by ltrk2p.
+no TSD, no call by Kmer2LTR.
 
 Three perturbation axes on those perfect elements:
 

@@ -6,8 +6,8 @@ import pytest
 
 from bench.homology_grid import (KAPPA, cells, d_for_p, evolve_tracked,
                                  make_element, shuffled_flank, true_alignment)
-from ltrk2p.k2p import count_substitutions
-from ltrk2p.scoring import k2p_probs
+from kmer2ltr.k2p import count_substitutions
+from kmer2ltr.scoring import k2p_probs
 
 
 def _rnd(n, seed):

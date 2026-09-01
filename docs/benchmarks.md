@@ -1,6 +1,6 @@
 # Benchmarks
 
-Every default in `ltrk2p` is set from measurement rather than by hand. This
+Every default in `Kmer2LTR` is set from measurement rather than by hand. This
 document records what was measured, on what, and what it decided. `docs/design.md`
 gives the reasoning; this gives the numbers.
 
@@ -32,7 +32,7 @@ Three properties are asked of every benchmark here:
 ### Homology grid — `bench/homology_grid.py`
 
 The primary benchmark, and the only one whose element selection involves no
-motif, no target-site duplication and no call by `ltrk2p`.
+motif, no target-site duplication and no call by `Kmer2LTR`.
 
 Its elements come from `truth.fa` and are **perfect by construction**: the two
 LTR copies are literally the same string, so their divergence is exactly zero and

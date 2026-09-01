@@ -1,6 +1,6 @@
 import gzip
 import pytest
-from ltrk2p.fasta import sanitize, read_fasta
+from kmer2ltr.fasta import sanitize, read_fasta
 
 def test_sanitize_uppercases_and_strips_whitespace():
     assert sanitize("acgt acgt\tacgt") == "ACGTACGTACGT"
@@ -63,7 +63,7 @@ def test_read_fasta_raw_indexes_identically_to_the_sanitized_sequence():
     """Coordinates are measured on the sanitized copy and used to slice the raw
     one, so the two must line up character for character."""
     import tempfile, os
-    from ltrk2p.fasta import read_fasta_raw
+    from kmer2ltr.fasta import read_fasta_raw
     fd, path = tempfile.mkstemp(suffix=".fa")
     os.close(fd)
     try:
@@ -84,7 +84,7 @@ def test_read_fasta_raw_preserves_case_and_ambiguity_codes():
     sliced FASTA outputs are written from this string precisely so that a
     boundary-corrected element is still the user's own sequence."""
     import tempfile, os
-    from ltrk2p.fasta import read_fasta_raw
+    from kmer2ltr.fasta import read_fasta_raw
     fd, path = tempfile.mkstemp(suffix=".fa")
     os.close(fd)
     try:
@@ -98,7 +98,7 @@ def test_read_fasta_raw_preserves_case_and_ambiguity_codes():
 
 def test_read_fasta_is_the_raw_reader_without_the_raw_column():
     import tempfile, os
-    from ltrk2p.fasta import read_fasta, read_fasta_raw
+    from kmer2ltr.fasta import read_fasta, read_fasta_raw
     fd, path = tempfile.mkstemp(suffix=".fa")
     os.close(fd)
     try:
@@ -118,7 +118,7 @@ def test_despace_and_sanitize_agree_on_whitespace_for_every_codepoint():
     single codepoint where they disagree would silently shift every downstream
     slice by one base with no error anywhere.
     """
-    from ltrk2p.fasta import _despace, sanitize
+    from kmer2ltr.fasta import _despace, sanitize
     disagree = [cp for cp in range(0x110000)
                 if not 0xD800 <= cp < 0xE000        # lone surrogates: not text
                 and len(sanitize(_despace(chr(cp)))) != len(_despace(chr(cp)))]
@@ -127,7 +127,7 @@ def test_despace_and_sanitize_agree_on_whitespace_for_every_codepoint():
 
 def test_raw_and_sanitized_line_up_through_the_reader():
     import random, tempfile, os
-    from ltrk2p.fasta import read_fasta_raw
+    from kmer2ltr.fasta import read_fasta_raw
     r = random.Random(0)
     pool = "ACGTacgtRYNn-*0 \t\v\f 　x"
     body = "".join(r.choice(pool) for _ in range(4000))

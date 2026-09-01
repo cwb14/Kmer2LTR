@@ -4,9 +4,9 @@ import random
 
 import pytest
 
-from ltrk2p.align import (SIG_GAPS, Bounds, calibrate, classify, discover,
+from kmer2ltr.align import (SIG_GAPS, Bounds, calibrate, classify, discover,
                           ltr_spans, outermost, snap_bounds, terminal_snap)
-from ltrk2p.scoring import GENERIC_MATRIX
+from kmer2ltr.scoring import GENERIC_MATRIX
 
 
 def _rnd(n, seed):
@@ -220,7 +220,7 @@ def test_sg_qe_db_anchors_the_outer_ends_and_frees_the_inner_ones():
     parasail's flag names describe free GAPS, not free ends, and the two read
     the same until they disagree."""
     import parasail
-    from ltrk2p.scoring import GENERIC_MATRIX, SCALE
+    from kmer2ltr.scoring import GENERIC_MATRIX, SCALE
     go, ge = 6 * SCALE, 2 * SCALE
     core = "ACGTACGTACGTACGTACGT"          # 20 bp shared repeat
     q = core + "T" * 15                     # repeat at the query's START
@@ -251,7 +251,7 @@ def test_score_table_read_matches_the_reported_score():
     """
     import numpy as np
     import parasail
-    from ltrk2p.scoring import GENERIC_MATRIX, SCALE
+    from kmer2ltr.scoring import GENERIC_MATRIX, SCALE
     go, ge = 6 * SCALE, 2 * SCALE
     q = _rnd(600, 900)
     r = q[:300] + _rnd(1200, 901)

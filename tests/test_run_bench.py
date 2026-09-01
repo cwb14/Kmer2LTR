@@ -62,7 +62,7 @@ def _write_fasta(tmp_path, records: dict[str, str]) -> Path:
 
 
 def test_ablate_calibrated_matches_direct_classify_call(tmp_path):
-    from ltrk2p.align import classify
+    from kmer2ltr.align import classify
     ltr = _rnd(300, 1)
     S = ltr + _rnd(900, 2) + ltr
     fa = _write_fasta(tmp_path, {"x": S})
@@ -192,12 +192,12 @@ def test_trim_leaves_boundaries_and_flank_calls_unchanged():
     for each K, and cross-config bias/RMSE comparisons would not isolate
     trim's effect on K2P from a boundary-call difference. classify()'s trim=
     only drops columns from the final aligned pair before count_substitutions
-    (see ltrk2p/align.py), strictly AFTER bounds/flank5_len/flank3_len are
+    (see kmer2ltr/align.py), strictly AFTER bounds/flank5_len/flank3_len are
     already fixed -- verified directly here, not just inferred from reading
     the source, since it is what every trim-config comparison in this
     module's gold analysis depends on.
     """
-    from ltrk2p.align import classify
+    from kmer2ltr.align import classify
     ltr = _rnd(300, 20)
     S = _rnd(30, 21) + ltr + _rnd(900, 22) + ltr + _rnd(45, 23)
     results = {k: classify("x", S, trim=k) for k in (0, 3, 5, 10)}

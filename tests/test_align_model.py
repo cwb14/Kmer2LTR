@@ -5,13 +5,13 @@ import random
 
 import pytest
 
-from ltrk2p.align import (GAP_EXTEND_BITS, GAP_OPEN_BITS, GAP_SCHEMES, Gaps,
+from kmer2ltr.align import (GAP_EXTEND_BITS, GAP_OPEN_BITS, GAP_SCHEMES, Gaps,
                           effective_t_bits,
                           SIG_GAPS, T_BITS, T_BITS_SCHEDULE, calibrate_full,
                           classify, discover, gaps_for_scheme,
                           gaps_from_alignment, ltr_spans, t_bits_for)
-from ltrk2p.k2p import count_gap_runs, count_substitutions
-from ltrk2p.scoring import GENERIC_MATRIX, SCALE
+from kmer2ltr.k2p import count_gap_runs, count_substitutions
+from kmer2ltr.scoring import GENERIC_MATRIX, SCALE
 
 
 def _rnd(n, seed):
@@ -284,7 +284,7 @@ def test_alpha_falls_with_divergence_which_is_why_the_floor_widens():
     """alpha is the whole mechanism: it is read off the element's own matrix and
     it shrinks as the pair diverges, so the blind spot widens exactly where
     boundaries are hardest."""
-    from ltrk2p.scoring import expected_random_bits, logodds_bits
+    from kmer2ltr.scoring import expected_random_bits, logodds_bits
     f = {b: 0.25 for b in "ACGT"}
     alphas = [expected_random_bits(logodds_bits(d, 2.0, f), f)
               for d in (0.01, 0.05, 0.10, 0.20, 0.35)]

@@ -89,7 +89,7 @@ def density_plot(tsv, out_pdf, mutation_rate: float | None = None) -> int:
     """
     x = read_k2p(tsv)
     if x.size == 0:
-        print(f"ltrk2p: warning: no passing element in {tsv}; no plot written",
+        print(f"Kmer2LTR: warning: no passing element in {tsv}; no plot written",
               file=sys.stderr)
         return 0
 

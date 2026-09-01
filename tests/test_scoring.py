@@ -2,8 +2,8 @@ import math
 import pytest
 import numpy as np
 import parasail
-from ltrk2p.k2p import SubstCounts
-from ltrk2p.scoring import (SCALE, k2p_probs, logodds_bits, parasail_matrix,
+from kmer2ltr.k2p import SubstCounts
+from kmer2ltr.scoring import (SCALE, k2p_probs, logodds_bits, parasail_matrix,
                             GENERIC_MATRIX, estimate_params, bits, evalue,
                             wfa_penalties)
 
