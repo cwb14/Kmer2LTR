@@ -36,21 +36,50 @@ def _open(path) -> Iterator[str]:
             yield from fh
 
 
-def read_fasta(path) -> Iterator[tuple[str, str]]:
-    """Yield (seq_id, sanitized_seq). seq_id is the header up to first whitespace.
+def _despace(seq: str) -> str:
+    """Drop every whitespace character, keeping all others untouched.
 
-    Streaming: only one record is held in memory at a time. Duplicate IDs are
-    yielded unchanged -- the one-row-per-record output contract makes them safe.
+    Uses the same notion of whitespace as `sanitize` (`str.isspace`, which is
+    what `str.split()` splits on), so `sanitize(_despace(s))` is the same
+    length as `_despace(s)` and the two index identically.
+    """
+    return "".join(seq.split())
+
+
+def read_fasta_raw(path) -> Iterator[tuple[str, str, str]]:
+    """Yield (seq_id, sanitized_seq, original_seq).
+
+    `original_seq` has had whitespace removed and nothing else: case, IUPAC
+    codes and every other character survive. It indexes identically to the
+    sanitized sequence, so a coordinate measured on one slices the other.
+
+    That is what the sequence-slicing outputs are written from, so
+    `--trim-flanks` and `--perfect-ltr-rt` never silently uppercase a
+    soft-masked genome or collapse an ambiguity code to N.
+
+    Streaming: at most one record is held in memory, in both forms.
     """
     seq_id: str | None = None
     chunks: list[str] = []
     for line in _open(path):
         if line.startswith(">"):
             if seq_id is not None:
-                yield seq_id, sanitize("".join(chunks))
+                raw = _despace("".join(chunks))
+                yield seq_id, sanitize(raw), raw
             seq_id = line[1:].strip().split(None, 1)[0] if line[1:].strip() else ""
             chunks = []
         elif seq_id is not None:
             chunks.append(line)
     if seq_id is not None:
-        yield seq_id, sanitize("".join(chunks))
+        raw = _despace("".join(chunks))
+        yield seq_id, sanitize(raw), raw
+
+
+def read_fasta(path) -> Iterator[tuple[str, str]]:
+    """Yield (seq_id, sanitized_seq). seq_id is the header up to first whitespace.
+
+    Streaming: only one record is held in memory at a time. Duplicate IDs are
+    yielded unchanged -- the one-row-per-record output contract makes them safe.
+    """
+    for seq_id, seq, _raw in read_fasta_raw(path):
+        yield seq_id, seq

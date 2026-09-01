@@ -102,3 +102,27 @@ def test_k2p_standard_error_matches_monte_carlo_sampling_sd():
     empirical_sd = (sum((x - mean) ** 2 for x in ds) / (len(ds) - 1)) ** 0.5
     reported_se = sum(ses) / len(ses)
     assert reported_se == pytest.approx(empirical_sd, rel=0.05)
+
+
+def test_insertion_time_divides_by_two_branches():
+    """The two LTRs are identical at insertion and diverge independently, so
+    the divergence spans TWO branches: t = d / (2*mu), not d / mu. Getting this
+    wrong is the classic factor-of-two error in LTR dating."""
+    from ltrk2p.k2p import insertion_time
+    assert insertion_time(0.14, 7e-9) == 10_000_000
+    assert insertion_time(0.0, 7e-9) == 0
+
+
+def test_insertion_time_halves_when_the_rate_doubles():
+    from ltrk2p.k2p import insertion_time
+    assert insertion_time(0.1, 2e-8) * 2 == insertion_time(0.1, 1e-8)
+
+
+def test_insertion_time_is_undefined_without_both_a_distance_and_a_rate():
+    """A saturated pair has no distance and an unspecified species has no rate;
+    inventing a default rate would report an age nobody asked for."""
+    from ltrk2p.k2p import insertion_time
+    assert insertion_time(None, 7e-9) is None
+    assert insertion_time(0.1, None) is None
+    assert insertion_time(0.1, 0.0) is None
+    assert insertion_time(0.1, -1e-9) is None

@@ -6,6 +6,7 @@ import random
 import pytest
 
 from ltrk2p.align import (GAP_EXTEND_BITS, GAP_OPEN_BITS, GAP_SCHEMES, Gaps,
+                          effective_t_bits,
                           SIG_GAPS, T_BITS, T_BITS_SCHEDULE, calibrate_full,
                           classify, discover, gaps_for_scheme,
                           gaps_from_alignment, ltr_spans, t_bits_for)
@@ -215,3 +216,77 @@ def test_pass_still_means_exactly_what_it_meant():
     r = classify("x", S, min_bitscore=1e9)
     assert r.status != "pass"
     assert classify("x", _rnd(3000, 80)).status == "no_pair"
+
+
+# --------------------------------------------------------------------------- #
+# The short-flank detection floor
+# --------------------------------------------------------------------------- #
+
+def test_a_flat_threshold_is_unreachable_below_its_own_floor():
+    """The motivating arithmetic: a k-base flank can present at most k*alpha
+    bits, so a flat t_bits cannot fire below k = t_bits/alpha whatever the
+    sequence says. This pins the floor the cap exists to remove."""
+    alpha = 1.84                                   # bits/base at d_hat ~ 0.10
+    t = 8.0
+    floor = t / alpha
+    assert floor == pytest.approx(4.35, abs=0.05)
+    # below the floor an uncapped threshold demands more than exists
+    assert effective_t_bits(t, 3, alpha, None) == t
+    assert 3 * alpha < t
+    # the cap never demands more than the flank can supply
+    for k in range(1, 20):
+        assert effective_t_bits(t, k, alpha, 1.0) <= k * alpha + 1e-9
+
+
+def test_cap_is_inert_above_the_floor_and_binds_below_it():
+    alpha, t = 1.84, 8.0
+    assert effective_t_bits(t, 100, alpha, 0.5) == t          # far above: inert
+    assert effective_t_bits(t, 2, alpha, 0.5) == pytest.approx(1.84)
+
+
+def test_cap_is_disabled_by_default_and_by_a_missing_alpha():
+    assert effective_t_bits(10.0, 1, 2.0, None) == 10.0       # beta None
+    assert effective_t_bits(10.0, 1, None, 0.5) == 10.0       # no alpha
+    assert effective_t_bits(10.0, 0, 2.0, 0.5) == 10.0        # no flank
+    assert effective_t_bits(10.0, 5, 0.0, 0.5) == 10.0        # degenerate alpha
+
+
+def test_strict_reproduces_the_uncapped_behaviour_exactly():
+    """`strict` is the default and must be indistinguishable from having no cap
+    at all -- that is what makes every earlier measurement still valid."""
+    ltr = _rnd(400, 81)
+    for seed, div in ((82, 0.02), (83, 0.15), (84, 0.30)):
+        S = _rnd(7, seed) + ltr + _rnd(1100, seed + 1) + _evolve(ltr, div, seed + 2)
+        a = classify("x", S, flank_sensitivity="strict")
+        b = classify("x", S)
+        assert (a.ltr5_start, a.ltr5_end, a.ltr3_start, a.ltr3_end, a.k2p) == \
+               (b.ltr5_start, b.ltr5_end, b.ltr3_start, b.ltr3_end, b.k2p)
+
+
+def test_looser_settings_never_call_a_shorter_flank_than_stricter_ones():
+    """Ordering is the contract the flag advertises: strict <= balanced <=
+    sensitive in willingness to call a flank."""
+    ltr = _rnd(400, 85)
+    for seed in range(6):
+        S = (_rnd(4, 900 + seed) + ltr + _rnd(1100, 910 + seed)
+             + _evolve(ltr, 0.08, 920 + seed) + _rnd(4, 930 + seed))
+        got = [classify("x", S, flank_sensitivity=m).flank5_len
+               for m in ("strict", "balanced", "sensitive")]
+        assert got == sorted(got), (seed, got)
+
+
+def test_unknown_sensitivity_fails_loudly():
+    with pytest.raises(ValueError):
+        classify("x", _rnd(400, 86) * 3, flank_sensitivity="aggressive")
+
+
+def test_alpha_falls_with_divergence_which_is_why_the_floor_widens():
+    """alpha is the whole mechanism: it is read off the element's own matrix and
+    it shrinks as the pair diverges, so the blind spot widens exactly where
+    boundaries are hardest."""
+    from ltrk2p.scoring import expected_random_bits, logodds_bits
+    f = {b: 0.25 for b in "ACGT"}
+    alphas = [expected_random_bits(logodds_bits(d, 2.0, f), f)
+              for d in (0.01, 0.05, 0.10, 0.20, 0.35)]
+    assert alphas == sorted(alphas, reverse=True)
+    assert alphas[0] > 4.0 and alphas[-1] < 1.0

@@ -96,3 +96,19 @@ def count_gap_runs(a: str, b: str) -> int:
             runs += 1
         in_a, in_b = ga, gb
     return runs
+
+
+def insertion_time(d: float | None, mu: float | None) -> int | None:
+    """Years since insertion, from LTR divergence under a strict clock.
+
+    An LTR retrotransposon inserts with two identical LTRs which then evolve
+    independently, so a divergence of `d` substitutions per site has
+    accumulated along TWO branches: d = 2 * mu * t. `mu` is the neutral
+    substitution rate per site per year.
+
+    Returned to the nearest whole year. The rate itself is known to about one
+    significant figure, so any finer precision would be spurious.
+    """
+    if d is None or mu is None or mu <= 0.0:
+        return None
+    return round(d / (2.0 * mu))

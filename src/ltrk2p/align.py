@@ -11,7 +11,7 @@ generic model and nothing else.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 
 import numpy as np
 import parasail
@@ -26,27 +26,16 @@ SIG_GAP_EXTEND = 2 * SCALE    # 2 bits
 MIN_LEN = 100                 # shorter than this cannot hold two LTRs plus internal
 W0 = 1500
 EDGE = 20                     # touching within this many bp of the inner edge -> grow
-MAX_EVALUE = 1e-10            # significance floor; Task 8 reuses this same constant
-# Task 16 calibrated this against bench/out/negatives.fa (46,823 real non-LTR
-# TEs: DNA transposons, LINEs, SINEs, Helitrons, satellites) and a dinucleotide
-# -shuffled null. The shuffled null is clean at any threshold tested (<=0.02%
-# throughout), so false "pass" calls on negatives.fa are not chance alignment
-# noise -- they come from real, strongly-significant direct terminal repeats
-# inside specific TE subclasses (satellites definitionally; a handful of
-# library-consensus entries in Helitron/CACTA/hAT/Jockey that are themselves
-# near-exact tandem constructions), which no significance threshold can
-# separate from a true LTR pair without the family classification this tool
-# explicitly declines to do (see "Non-goals"). At the old default (1e-3),
-# false-"pass" rate on negatives.fa was 9.09%; tightening alone never reaches
-# <1% without unacceptable true-positive cost: 2.86% FP still costs 9.8
-# points of arab_ltr_all_clean pass rate at 1e-30, and even 1e-200 (0.41% FP)
-# collapses real-data pass rate to 31%. 1e-10 is the last point before that
-# cliff: FP nearly halves (9.09%->5.23%) while arab_ltr_all_clean pass rate
-# moves only 99.80%->99.67% (13/10307 records). The cost concentrates in the
-# tool's already-hardest population (d_nominal in {0.4,0.5}, no added flank,
-# on the real gold-perturbed grid: 72.8%->53.8%) -- an amplification of an
-# existing high-divergence weakness, not a new failure mode. Full sweep:
-# bench/out/memo_real.md.
+MAX_EVALUE = 1e-10            # significance floor, shared by every gate in the tool
+# Calibrated against 46,823 real non-LTR TEs plus a composition-matched shuffled
+# null. The shuffled null is clean at every threshold tested, so the residual
+# false-"pass" rate is real terminal-repeat structure inside specific subclasses
+# -- satellites definitionally, plus some library-consensus entries that are
+# near-exact tandem constructions -- not chance alignment noise. No threshold
+# separates those from a true LTR pair without the family classification this
+# tool declines to do. 1e-10 is the last point before the true-positive cost
+# curve steepens: it nearly halves the false-"pass" rate (9.09% -> 5.23%) while
+# real-data pass rate moves 99.80% -> 99.67%. Full sweep: docs/benchmarks.md.
 
 
 @dataclass(frozen=True)
@@ -139,8 +128,10 @@ def discover(S: str, matrix, gap_open: int | Gaps = SIG_GAP_OPEN,
         return Hit(score=fwd.score, qb=qb, qe=qe, rb=rb, re=re_, w=w)
 
 
-from .k2p import count_gap_runs, count_substitutions, k2p_distance, p_distance
-from .scoring import estimate_params, logodds_bits, parasail_matrix, wfa_penalties
+from .k2p import (count_gap_runs, count_substitutions, insertion_time,
+                  k2p_distance, p_distance)
+from .scoring import (estimate_params, expected_random_bits, generic_alpha,
+                      logodds_bits, parasail_matrix, wfa_penalties)
 from .cigar import aligned_pair_from_cigartuples, cs_string, extended_cigar
 from pywfa import WavefrontAligner
 
@@ -224,6 +215,7 @@ class Calib:
     d_hat: float
     kappa_hat: float
     gaps: Gaps
+    alpha: float          # bits lost per non-homologous aligned base
 
 
 def calibrate_full(S: str, spans, *, comp: str = "element",
@@ -245,9 +237,12 @@ def calibrate_full(S: str, spans, *, comp: str = "element",
         # Degenerate core: keep the generic model whole rather than manufacturing
         # a degenerate one from it. That includes the gap penalties -- an indel
         # rate estimated from under 50 ungapped columns is noise.
-        return Calib(GENERIC_MATRIX, d_hat, kappa_hat, gaps_for_scheme("legacy"))
-    return Calib(parasail_matrix(logodds_bits(d_hat, kappa_hat, freqs)),
-                 d_hat, kappa_hat, gaps_for_scheme(gap_scheme, a, b, counts))
+        return Calib(GENERIC_MATRIX, d_hat, kappa_hat, gaps_for_scheme("legacy"),
+                     generic_alpha())
+    lo = logodds_bits(d_hat, kappa_hat, freqs)
+    return Calib(parasail_matrix(lo), d_hat, kappa_hat,
+                 gaps_for_scheme(gap_scheme, a, b, counts),
+                 expected_random_bits(lo, freqs))
 
 
 def calibrate(S: str, hit, comp: str = "element"):
@@ -265,31 +260,20 @@ def calibrate(S: str, hit, comp: str = "element"):
 # --------------------------------------------------------------------------- #
 
 T_BITS = 10.0    # fixed fallback when no d_hat is available; benchmark-calibrated
-# Task 14 swept {2,5,8,10,15,20,30} on 260,876 perturbed REAL gold elements
-# (bench/out/cells_tbits_*.json, bench/out/memo_bench.md). At the old default
-# (5.0), false-flank rate at d=0.3 was 26.8%; at 10.0 it is 8.5% (a 3.2x drop),
-# while large-flank detection is nearly unchanged (det@50 93.0%->91.3%,
-# det@100 91.7%->91.6%). The cost lands on 10-20bp flanks (det@10 75.5%->
-# 39.4%, det@20 88.8%->70.5%), which the spec already documents as sitting
-# near the detection floor.
+# Swept over {2,5,8,10,15,20,30} on 260,876 perturbed real elements. Raising it
+# from 5 to 10 cuts the false-flank rate ~3x at d=0.3 while large-flank detection
+# barely moves; the cost falls on 10-20 bp flanks, which sit near the detection
+# floor `effective_t_bits` describes. Sweep table: docs/benchmarks.md.
 
-# Divergence-aware schedule: (exclusive upper bound on d_hat, t_bits).
-# A single constant is a poor fit because the false-flank rate at a FIXED
-# t_bits swings across the observed d_hat range while t_bits does not. Derived
-# by bench/derive_schedule.py under a rule committed BEFORE the sweep it
-# consumes was run (5ac6c89), and applied by bench/apply_schedule.py so the
-# shipped constant is provably what that rule produced.
+# Divergence-aware schedule: (exclusive upper bound on d_hat, t_bits). A single
+# constant fits badly -- at fixed t_bits the false-flank rate swings 40-80x
+# across the observed d_hat range while the threshold does not move. Derived by
+# bench/calibrate_flank_threshold.py under a rule fixed before the sweep it
+# consumes is run, against an explicit large-flank detection floor.
 #
-# The shape is the opposite of what Task 14's illustrative schedules suggested:
-# it RELAXES the threshold at low divergence rather than tightening it at high,
-# because the detection floor ruled t=15 and t=20 inadmissible in every bin. In
-# the d_hat<0.025 bin -- near-identical LTR copies, so an unambiguous boundary --
-# t=2 lifts 5bp flank detection from 83.7% to 98.9% for 1.5 points of
-# false-flank rate. Against a flat threshold re-tuned to the SAME pooled
-# false-flank rate the schedule is worth +3.7 points of det@10 on the gold grid
-# and +2.6 of det@5 on the homology grid, at -0.0 to -1.4 points on every larger
-# flank: a real but modest Pareto gain, much smaller than Task 14 projected --
-# see docs/.../2026-08-28-ltrk2p-design.md, Stage 3, for why.
+# It RELAXES the threshold at low divergence rather than tightening it at high,
+# which is the opposite of the obvious guess: the floor rules out t=15 and t=20
+# in every bin. See docs/design.md, Stage 3, for the trade it buys.
 T_BITS_SCHEDULE: tuple[tuple[float, float], ...] = (
     (0.025, 2),
     (0.15, 8),
@@ -306,6 +290,44 @@ def t_bits_for(d_hat: float | None) -> float:
             return t
     return T_BITS_SCHEDULE[-1][1]
 
+
+def effective_t_bits(t_bits: float, k: int, alpha: float | None,
+                     beta: float | None) -> float:
+    """Cap the demanded evidence at what a k-base flank can physically supply.
+
+    The snap test accepts homology to the terminus when the extension costs less
+    than `t_bits`. A non-homologous flank accumulates cost at `alpha` bits per
+    base (`scoring.expected_random_bits`), so a flank of length k can never
+    present more than `k * alpha` bits of evidence against the snap. Whenever
+    `k * alpha < t_bits` the test cannot fire whatever the sequence says: the
+    boundary is decided before it is looked at. Since `alpha` falls with
+    divergence -- 4.2 bits/base at d=0.01 down to 0.73 at d=0.35 -- that blind
+    spot is a few bases wide on a young element and over a dozen on an old one,
+    which is exactly the shape of the measured detection curve.
+
+    `beta` sets where inside the available evidence the decision sits. A
+    homologous continuation scores about 0; a non-homologous one about
+    `-k * alpha`; so `beta = 0.5` is the maximum-likelihood split between the two
+    hypotheses for a segment of that length, and `beta = 1.0` tests against the
+    flank hypothesis's own expectation. `None` restores a flat threshold.
+
+    Below the floor no threshold recovers certainty -- a 1 bp flank carries one
+    base of evidence and is near-chance however it is tested -- so this raises
+    detection to the information-theoretic ceiling, not past it.
+    """
+    if beta is None or alpha is None or alpha <= 0.0 or k <= 0:
+        return t_bits
+    return min(t_bits, beta * alpha * k)
+
+
+# How much evidence a flank must present, as a fraction of the most it could.
+# Lower is more willing to call a flank. `None` disables the cap entirely, which
+# is the behaviour every measurement before 2026-08-31 was made under.
+FLANK_SENSITIVITY: dict[str, float | None] = {
+    "strict": None,
+    "balanced": 1.0,
+    "sensitive": 0.5,
+}
 
 EXT_CAP = 2000       # max flank bases scored in one graded extension (memory bound)
 EXT_REF_SLACK = 200  # ref allowance beyond 2x the query length
@@ -325,7 +347,8 @@ class Bounds:
 
 
 def _extend(outer: str, inner: str, matrix, gaps: Gaps, t_bits: float,
-            graded: bool) -> tuple[int, int, float]:
+            graded: bool, alpha: float | None = None,
+            beta: float | None = None) -> tuple[int, int, float]:
     """One anchored outward extension of an alignment end.
 
     `outer` is the candidate flank, consumed from the core outward; `inner` is
@@ -345,6 +368,7 @@ def _extend(outer: str, inner: str, matrix, gaps: Gaps, t_bits: float,
     """
     if not outer or not inner:
         return 0, 0, None
+    t_bits = effective_t_bits(t_bits, len(outer), alpha, beta)
     n_ref = min(len(inner), 2 * len(outer) + EXT_REF_SLACK)
     inner = inner[:n_ref]
     res = parasail.sg_de_striped_sat(outer, inner, gaps.open, gaps.extend, matrix)
@@ -424,7 +448,8 @@ def _joint_inner(S: str, b: Bounds, matrix, gaps: Gaps) -> Bounds:
 
 
 def snap_bounds(S: str, spans, matrix, gaps: Gaps = SIG_GAPS, t_bits: float = T_BITS,
-                *, mode: str = "binary", inner: str = "none") -> Bounds:
+                *, mode: str = "binary", inner: str = "none",
+                alpha: float | None = None, beta: float | None = None) -> Bounds:
     """Decide, per terminus, whether homology reaches the end of the sequence.
 
     Exact model comparison rather than a greedy endpoint: extending the core to
@@ -449,7 +474,7 @@ def snap_bounds(S: str, spans, matrix, gaps: Gaps = SIG_GAPS, t_bits: float = T_
     # the alignment. Reversed so index 0 is adjacent to the core.
     if l5b > 0 and l3b > l5e + 1:
         k_out, k_in, m = _extend(S[:l5b][::-1], S[l5e + 1:l3b][::-1],
-                                 matrix, gaps, t_bits, graded)
+                                 matrix, gaps, t_bits, graded, alpha, beta)
         if m is not None:
             margins.append(m)
         l5b -= k_out
@@ -459,7 +484,7 @@ def snap_bounds(S: str, spans, matrix, gaps: Gaps = SIG_GAPS, t_bits: float = T_
     # outward from the core, so no reversal.
     if l3e < L - 1 and l3b > l5e + 1:
         k_out, k_in, m = _extend(S[l3e + 1:], S[l5e + 1:l3b],
-                                 matrix, gaps, t_bits, graded)
+                                 matrix, gaps, t_bits, graded, alpha, beta)
         if m is not None:
             margins.append(m)
         l3e += k_out
@@ -478,10 +503,11 @@ def snap_bounds(S: str, spans, matrix, gaps: Gaps = SIG_GAPS, t_bits: float = T_
 
 def terminal_snap(S: str, hit: Hit, matrix, t_bits: float = T_BITS,
                   gaps: Gaps = SIG_GAPS, *, mode: str = "binary",
-                  inner: str = "none") -> Bounds:
+                  inner: str = "none", alpha: float | None = None,
+                  beta: float | None = None) -> Bounds:
     """`snap_bounds` for a caller holding a `Hit` (the Stage 1 entry point)."""
     return snap_bounds(S, ltr_spans(S, hit), matrix, gaps, t_bits,
-                       mode=mode, inner=inner)
+                       mode=mode, inner=inner, alpha=alpha, beta=beta)
 
 
 # --------------------------------------------------------------------------- #
@@ -577,10 +603,18 @@ class Result:
     bitscore: float | None
     flank_margin_bits: float | None
     cigar: str | None
+    # Appended after `cigar`, not inserted before it: every column that existed
+    # before these two keeps its 1-based index, so a documented recipe like
+    # `cut -f1,4-7,19,23` still selects the same fields.
+    motif: str | None           # e.g. "tg...ca": the two terminal dinucleotides
+    k2p_time: int | None        # years since insertion; needs a mutation rate
+
+
+_N_DATA_FIELDS = len(fields(Result)) - 3   # everything after seq_id/seq_len/status
 
 
 def _empty(seq_id: str, seq_len: int, status: str) -> Result:
-    return Result(seq_id, seq_len, status, *([None] * 20))
+    return Result(seq_id, seq_len, status, *([None] * _N_DATA_FIELDS))
 
 
 def _refine(q: str, r: str, gaps: Gaps = SIG_GAPS) -> tuple[str, str]:
@@ -601,37 +635,68 @@ def _refine_matrix(q: str, r: str, matrix, gaps: Gaps = SIG_GAPS) -> tuple[str, 
     return res.traceback.query, res.traceback.ref
 
 
-def classify(seq_id: str, S: str, *, cs: bool = False, t_bits: float | None = None,
-             max_evalue: float = MAX_EVALUE, w0: int = W0,
-             min_bitscore: float | None = None, matrix=None,
-             use_stage3: bool = True, use_stage4: bool = True,
-             trim: int = 0, refine: str = "wfa",
-             snap_mode: str = "binary", inner: str = "none",
-             comp: str = "element", gap_scheme: str = "adaptive",
-             keep_weak: bool = True, stage4_recal: bool = True) -> Result:
+def classify(seq_id: str, S: str, **kw) -> Result:
     """Locate the LTR pair and measure its divergence.
 
     `t_bits=None` uses the divergence-aware schedule (`t_bits_for(d_hat)`); an
     explicit value pins the threshold, which is what `--flank-bits` does.
 
+    `flank_sensitivity` selects how much of a short flank's available evidence
+    must be presented before it is believed (see `effective_t_bits`). It encodes
+    a prior about the input, not about the sequence, which is why it is a choice
+    and not a calibrated constant: `"strict"` suits tightly-extracted structural
+    predictions, the looser settings suit input padded with genomic context.
+
+    `mutation_rate` (substitutions per site per year) turns the divergence into
+    a `k2p_time` in years; without it that column is `None`.
+
     Keyword knobs after `min_bitscore` drive the benchmark ablations; their
-    defaults reproduce production behaviour.
+    defaults reproduce production behaviour. See `_classify` for the full
+    signature -- this wrapper exists only to keep the public return type a
+    plain `Result`.
+    """
+    return _classify(seq_id, S, **kw)[0]
+
+
+def _classify(seq_id: str, S: str, *, cs: bool = False, t_bits: float | None = None,
+              max_evalue: float = MAX_EVALUE, w0: int = W0,
+              min_bitscore: float | None = None, matrix=None,
+              use_stage3: bool = True, use_stage4: bool = True,
+              trim: int = 0, refine: str = "wfa",
+              snap_mode: str = "binary", inner: str = "none",
+              comp: str = "element", gap_scheme: str = "adaptive",
+              keep_weak: bool = True, stage4_recal: bool = True,
+              flank_sensitivity: str = "strict",
+              mutation_rate: float | None = None) -> tuple[Result, tuple[str, str] | None]:
+    """`classify` plus the final aligned LTR pair.
+
+    The pair is what `extras.py` builds the IUPAC consensus from. Returning it
+    here rather than re-aligning is not just an optimisation: it makes the
+    consensus and the reported divergence two readings of one alignment, so
+    they cannot disagree. It stays off `Result` because every record would then
+    carry two more kilobyte-scale strings back from its worker process, on
+    every run, for a payload the TSV never emits.
     """
     L = len(S)
     if L < MIN_LEN:
-        return _empty(seq_id, L, "too_short")
+        return _empty(seq_id, L, "too_short"), None
     if all(ch == "N" for ch in S):
-        return _empty(seq_id, L, "all_ambiguous")
+        return _empty(seq_id, L, "all_ambiguous"), None
 
     hit = discover(S, GENERIC_MATRIX, SIG_GAPS, w0=w0)
     if hit is None:
-        return _empty(seq_id, L, "no_pair")
+        return _empty(seq_id, L, "no_pair"), None
 
+    if flank_sensitivity not in FLANK_SENSITIVITY:
+        raise ValueError(f"unknown flank_sensitivity {flank_sensitivity!r}; "
+                         f"choices: {sorted(FLANK_SENSITIVITY)}")
+    beta = FLANK_SENSITIVITY[flank_sensitivity]
     d_hat = None
+    alpha = generic_alpha()
     gaps = gaps_for_scheme(gap_scheme if gap_scheme != "adaptive" else "legacy")
     if matrix is None:
         cal = calibrate_full(S, ltr_spans(S, hit), comp=comp, gap_scheme=gap_scheme)
-        matrix, d_hat, gaps = cal.matrix, cal.d_hat, cal.gaps
+        matrix, d_hat, gaps, alpha = cal.matrix, cal.d_hat, cal.gaps, cal.alpha
         # Seed the second pass at the window the first pass settled on rather
         # than re-growing from w0. This is an efficiency change, not a fix: on a
         # 300-element sweep over LTRs of 1.6-6 kb at p in {0.02,0.1,0.2}, every
@@ -644,7 +709,8 @@ def classify(seq_id: str, S: str, *, cs: bool = False, t_bits: float | None = No
 
     spans = ltr_spans(S, hit)
     if use_stage3:
-        bounds = snap_bounds(S, spans, matrix, gaps, tb, mode=snap_mode, inner=inner)
+        bounds = snap_bounds(S, spans, matrix, gaps, tb, mode=snap_mode,
+                             inner=inner, alpha=alpha, beta=beta)
     else:
         bounds = Bounds(*spans, None)
 
@@ -661,7 +727,8 @@ def classify(seq_id: str, S: str, *, cs: bool = False, t_bits: float | None = No
             tb2 = t_bits if t_bits is not None else t_bits_for(cal2.d_hat)
             if use_stage3:
                 bounds = snap_bounds(S, re_sp, cal2.matrix, cal2.gaps, tb2,
-                                     mode=snap_mode, inner=inner)
+                                     mode=snap_mode, inner=inner,
+                                     alpha=cal2.alpha, beta=beta)
             else:
                 bounds = Bounds(*re_sp, outer.margin_bits)
             matrix, gaps = cal2.matrix, cal2.gaps
@@ -671,15 +738,15 @@ def classify(seq_id: str, S: str, *, cs: bool = False, t_bits: float | None = No
     q = S[bounds.l5b:bounds.l5e + 1]
     r = S[bounds.l3b:bounds.l3e + 1]
     if not q or not r:
-        return _empty(seq_id, L, "no_pair")
+        return _empty(seq_id, L, "no_pair"), None
     a, b = _refine(q, r, gaps) if refine == "wfa" else _refine_matrix(q, r, matrix, gaps)
     if trim:
         if len(a) <= 2 * trim:
-            return _empty(seq_id, L, "no_pair")
+            return _empty(seq_id, L, "no_pair"), None
         a, b = a[trim:-trim], b[trim:-trim]
     counts = count_substitutions(a, b)
     if counts.n_sites == 0:
-        return _empty(seq_id, L, "no_pair")
+        return _empty(seq_id, L, "no_pair"), None
 
     # Significance is ALWAYS scored with the generic model -- GENERIC_MATRIX and
     # SIG_GAPS -- never the calibrated one. MAX_EVALUE is calibrated against that
@@ -695,16 +762,21 @@ def classify(seq_id: str, S: str, *, cs: bool = False, t_bits: float | None = No
     weak = (evalue(bitscore, hit.w, hit.w) > max_evalue
             or (min_bitscore is not None and bitscore < min_bitscore))
     if weak and not keep_weak:
-        return _empty(seq_id, L, "no_pair")
+        return _empty(seq_id, L, "no_pair"), None
 
     d, se = k2p_distance(counts)
+    # Reported straight off the settled boundaries, never searched for: the tool
+    # uses no terminal-motif prior anywhere, so this column stays an INDEPENDENT
+    # check on the boundary call rather than a restatement of it.
+    motif = (f"{q[:2]}...{r[-2:]}".lower()
+             if len(q) >= 2 and len(r) >= 2 else None)
     # A located-but-insignificant pair is reported, not deleted: its coordinates,
     # counts and divergence are real measurements, and `status == "pass"` still
     # means exactly what it always did, so the TSV remains a clean filter.
     status = "weak_pair" if weak else ("pass" if d is not None else "k2p_undefined")
     pd = p_distance(counts)
     aln_str = cs_string(a, b) if cs else extended_cigar(a, b)
-    return Result(
+    return (Result(
         seq_id=seq_id, seq_len=L, status=status,
         ltr5_start=bounds.l5b + 1, ltr5_end=bounds.l5e + 1,
         ltr3_start=bounds.l3b + 1, ltr3_end=bounds.l3e + 1,
@@ -715,4 +787,5 @@ def classify(seq_id: str, S: str, *, cs: bool = False, t_bits: float | None = No
         identity=counts.n_match / counts.n_sites,
         p_dist=pd, k2p=d, k2p_se=se, bitscore=bitscore,
         flank_margin_bits=bounds.margin_bits, cigar=aln_str,
-    )
+        motif=motif, k2p_time=insertion_time(d, mutation_rate),
+    ), (a, b))

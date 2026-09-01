@@ -8,8 +8,9 @@ from dataclasses import astuple, fields
 from itertools import islice
 from pathlib import Path
 
-from .align import Result, classify
-from .fasta import read_fasta
+from .align import Result, classify, _classify
+from .extras import ExtraSpec, ExtraWriter, build
+from .fasta import read_fasta, read_fasta_raw
 
 COLUMNS = [f.name for f in fields(Result)]
 
@@ -21,7 +22,7 @@ def _fmt(v) -> str:
         # `+ 0.0` normalises negative zero. K2P of an identical pair evaluates to
         # -0.5*log(1) - 0.25*log(1) == -0.0, which formats as the string "-0" --
         # numerically equal to zero but a needless surprise in a data column
-        # (1,767 of 10,307 arabidopsis rows in the Task 16 run).
+        # (1,767 of 10,307 rows on the arabidopsis dataset).
         return f"{v + 0.0:.6g}"
     return str(v)
 
@@ -30,23 +31,62 @@ def format_row(r: Result) -> str:
     return "\t".join(_fmt(v) for v in astuple(r))
 
 
-def count_data_lines(path) -> int:
+def scan_output(path) -> tuple[int, int, bool]:
+    """`(complete_data_lines, byte_offset_after_them, has_header)` for a TSV.
+
+    Only NEWLINE-TERMINATED lines are counted. A run killed mid-write leaves a
+    partial final line; counting it as complete makes `--resume` skip a record
+    that was never written and then append onto the fragment, producing one
+    lost record and one row of two records concatenated. The offset lets the
+    caller truncate that fragment away before appending.
+
+    `has_header` is false for a missing or empty file, which is what stops a
+    `--resume` against a file that does not exist yet from writing a headerless
+    TSV -- silently costing the first data row to every `csv.DictReader`
+    downstream.
+    """
     p = Path(path)
     if not p.exists():
-        return 0
-    with open(p) as fh:
-        return max(0, sum(1 for _ in fh) - 1)
+        return 0, 0, False
+    lines = offset = 0
+    with open(p, "rb") as fh:
+        for raw in fh:
+            if not raw.endswith(b"\n"):
+                break
+            lines += 1
+            offset += len(raw)
+    return max(0, lines - 1), offset, lines > 0
+
+
+def count_data_lines(path) -> int:
+    """Complete data lines already written to an output TSV."""
+    return scan_output(path)[0]
 
 
 def _work(args):
-    seq_id, seq, kw = args
-    return classify(seq_id, seq, **kw)
+    """One record: a TSV row, plus the auxiliary records if any were asked for.
+
+    The extras are built HERE rather than in the parent so only the records
+    actually wanted travel back; sending the aligned pair and the raw sequence
+    home to build them there would be the larger payload of the two.
+    """
+    seq_id, seq, raw, spec, kw = args
+    if spec is None:
+        return classify(seq_id, seq, **kw), None
+    result, aln = _classify(seq_id, seq, **kw)
+    return result, build(result, aln, raw, spec)
 
 
 def run(input_path, out_handle, threads: int = 1, cs: bool = False,
         resume_skip: int = 0, verbose: bool = False, resuming: bool = False,
+        spec: ExtraSpec | None = None, writer: ExtraWriter | None = None,
         **classify_kw) -> int:
-    records = read_fasta(input_path)
+    # The raw sequence is read, and sent to the workers, only when something
+    # needs it -- a run with no auxiliary output moves exactly the bytes it
+    # always did.
+    spec = spec or None
+    records = (read_fasta_raw(input_path) if spec
+               else ((sid, seq, "") for sid, seq in read_fasta(input_path)))
     if resume_skip:
         records = islice(records, resume_skip, None)
     # resume_skip > 0 can only happen when resuming, so it implies it. The explicit
@@ -56,28 +96,30 @@ def run(input_path, out_handle, threads: int = 1, cs: bool = False,
         out_handle.write("\t".join(COLUMNS) + "\n")
 
     kw = {"cs": cs, **classify_kw}
-    tasks = ((sid, seq, kw) for sid, seq in records)
+    tasks = ((sid, seq, raw, spec, kw) for sid, seq, raw in records)
     n = 0
+
+    def emit(payload) -> None:
+        nonlocal n
+        result, extras = payload
+        out_handle.write(format_row(result) + "\n")
+        if writer is not None:
+            writer.write(extras)
+        n += 1
+        every = 1000 if verbose else 25000
+        if n % every == 0:
+            print(f"  {n} records", file=sys.stderr)
+
     if threads <= 1:
         for t in tasks:
-            out_handle.write(format_row(_work(t)) + "\n")
-            n += 1
-            if verbose and n % 1000 == 0:
-                print(f"  {n} records", file=sys.stderr)
-            elif not verbose and n % 25000 == 0:
-                print(f"  {n} records", file=sys.stderr)
+            emit(_work(t))
     else:
         max_inflight = max(1, threads) * 4
         with ProcessPoolExecutor(max_workers=threads) as pool:
             it = iter(tasks)
             pending = deque(pool.submit(_work, t) for t in islice(it, max_inflight))
             while pending:
-                out_handle.write(format_row(pending.popleft().result()) + "\n")
-                n += 1
-                if verbose and n % 1000 == 0:
-                    print(f"  {n} records", file=sys.stderr)
-                elif not verbose and n % 25000 == 0:
-                    print(f"  {n} records", file=sys.stderr)
+                emit(pending.popleft().result())
                 nxt = next(it, None)
                 if nxt is not None:
                     pending.append(pool.submit(_work, nxt))

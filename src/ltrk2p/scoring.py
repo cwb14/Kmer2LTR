@@ -149,3 +149,22 @@ def wfa_penalties(match: int, mismatch: int, open_p: int, ext_p: int) -> tuple[i
     e = 2 * ext_p + match
     o = 2 * (open_p - ext_p)
     return x, o, e
+
+
+def expected_random_bits(bits_map: dict[tuple[str, str], float],
+                         freqs: dict[str, float]) -> float:
+    """Bits lost per aligned base when the two bases are NOT homologous.
+
+    The expectation of s(x,y) over x, y drawn independently at `freqs`, negated
+    so it is a positive cost. This is the slope at which a non-homologous
+    extension accumulates penalty, and therefore the rate at which a flank of
+    length k can supply evidence that it is a flank: at most k * alpha bits.
+    """
+    return -sum(freqs.get(x, 0.25) * freqs.get(y, 0.25) * bits_map[(x, y)]
+                for x in _BASES for y in _BASES)
+
+
+def generic_alpha() -> float:
+    """`expected_random_bits` for the generic +1/-1 model at uniform composition."""
+    flat = {(x, y): (1.0 if x == y else -1.0) for x in _BASES for y in _BASES}
+    return expected_random_bits(flat, {b: 0.25 for b in _BASES})

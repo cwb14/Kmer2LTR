@@ -79,13 +79,74 @@ def test_cs_flag_switches_alignment_string():
     assert "=" in r_cig.cigar
     assert r_cs.cigar.startswith(":")
 
-def test_every_result_has_all_23_fields():
+def test_every_result_has_all_25_fields():
     from dataclasses import fields
     r = classify("x", _rnd(3000, 18))
-    assert len(fields(r)) == 23
+    assert len(fields(r)) == 25
 
 def test_identity_and_p_dist_are_consistent():
     ltr = _rnd(600, 19)
     S = ltr + _rnd(900, 20) + _evolve(ltr, 0.12, 21)
     r = classify("x", S)
     assert r.identity == pytest.approx(1.0 - r.p_dist, abs=1e-9)
+
+
+# --------------------------------------------------------------------------- #
+# Terminal motif and insertion time
+# --------------------------------------------------------------------------- #
+
+def test_motif_reports_the_dinucleotides_at_the_called_boundaries():
+    ltr = "TG" + _rnd(296, 30) + "CA"
+    S = ltr + _rnd(1000, 31) + ltr
+    r = classify("x", S)
+    assert r.status == "pass" and (r.ltr5_start, r.ltr3_end) == (1, len(S))
+    assert r.motif == "tg...ca"
+
+
+def test_motif_is_read_off_the_boundary_and_never_searched_for():
+    """The tool uses no terminal-motif prior anywhere, which is what makes the
+    `TG`..`CA` rate on real data an INDEPENDENT accuracy check rather than a
+    restatement of its own call. An element with non-canonical termini must be
+    bounded just as well, and simply report what is there."""
+    ltr = "AA" + _rnd(296, 32) + "GG"
+    S = ltr + _rnd(1000, 33) + ltr
+    r = classify("x", S)
+    assert (r.ltr5_start, r.ltr3_end) == (1, len(S))
+    assert r.motif == "aa...gg"
+
+
+def test_motif_follows_a_flank_correction():
+    """The motif must come from the CORRECTED boundary, not the raw input ends
+    -- otherwise it could not measure whether the correction was right."""
+    ltr = "TG" + _rnd(396, 34) + "CA"
+    S = _rnd(120, 35) + ltr + _rnd(900, 36) + ltr + _rnd(90, 37)
+    r = classify("x", S)
+    assert r.flank5_len > 0 and r.flank3_len > 0
+    assert r.motif == "tg...ca", f"motif {r.motif} with flanks {r.flank5_len}/{r.flank3_len}"
+
+
+def test_k2p_time_needs_a_mutation_rate_and_matches_the_distance():
+    ltr = _rnd(400, 38)
+    S = ltr + _rnd(1000, 39) + _evolve(ltr, 0.08, 40)
+    assert classify("x", S).k2p_time is None
+    r = classify("x", S, mutation_rate=7e-9)
+    assert r.k2p_time == round(r.k2p / (2 * 7e-9))
+
+
+def test_a_mutation_rate_changes_nothing_else_in_the_row():
+    """`-u` is a unit conversion applied after the measurement; it must not be
+    able to move a boundary or a distance."""
+    from dataclasses import replace
+    ltr = _rnd(350, 41)
+    S = _rnd(60, 42) + ltr + _rnd(900, 43) + _evolve(ltr, 0.15, 44)
+    plain = classify("x", S)
+    dated = classify("x", S, mutation_rate=1.3e-8)
+    assert dated.k2p_time is not None
+    assert replace(dated, k2p_time=None) == plain
+
+
+def test_rows_without_a_pair_report_no_motif_and_no_time():
+    for r in (classify("x", "ACGT" * 10, mutation_rate=7e-9),
+              classify("x", "N" * 500, mutation_rate=7e-9),
+              classify("x", _rnd(3000, 45), mutation_rate=7e-9)):
+        assert r.motif is None and r.k2p_time is None, r.status
