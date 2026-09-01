@@ -1,5 +1,11 @@
 # Kmer2LTR
 
+> **This is the legacy branch.** Kmer2LTR has since been rewritten; the
+> current version is on [`main`](https://github.com/cwb14/Kmer2LTR). This
+> branch is kept so earlier results stay reproducible, and is still the one
+> to use if you need a domains file (`-D`), JC69 distances, or the pooled
+> `*.summary` output. Both carry the same command name.
+
 Estimate when LTR retrotransposons inserted, from the divergence between their two LTRs.
 
 An LTR-RT starts life with two identical LTRs; after insertion they mutate independently, so
