@@ -307,4 +307,6 @@ If this is useful in published work, please cite the repository.
 
 ## Licence
 
-MIT. See `LICENSE`.
+GNU General Public License v3. See `LICENSE`.
+
+Copyright (c) 2026 Chris Benson.
