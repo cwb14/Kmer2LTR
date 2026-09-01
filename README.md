@@ -11,6 +11,12 @@ distance between them, and the alignment that produced it.
 Kmer2LTR elements.fa.gz -o elements.tsv -t 20
 ```
 
+> This is a rewrite, and the current version. The original k-mer/MAFFT
+> implementation is preserved unchanged on the
+> [`legacy`](https://github.com/cwb14/Kmer2LTR/tree/legacy) branch, which is
+> still the one to use if you need a domains file (`-D`), JC69 distances, or
+> the pooled `*.summary` output. Both carry the same command name.
+
 ## What it assumes
 
 One thing only: **the 5' and 3' ends of each input sequence are homologous to
