@@ -1,6 +1,6 @@
 import gzip
 import pytest
-from kmer2ltr.fasta import sanitize, read_fasta
+from kmer2ltr.fasta import sanitize, read_fasta, read_headers
 
 def test_sanitize_uppercases_and_strips_whitespace():
     assert sanitize("acgt acgt\tacgt") == "ACGTACGTACGT"
@@ -141,3 +141,24 @@ def test_raw_and_sanitized_line_up_through_the_reader():
         os.unlink(path)
     assert len(clean) == len(raw)
     assert all((c == "N") or (c == rc.upper()) for c, rc in zip(clean, raw))
+
+
+def test_read_headers_yields_ids_without_building_sequences(tmp_path):
+    p = tmp_path / "x.fa"
+    p.write_text(">a:1-10#LTR desc\nACGT\nACGT\n>b\nTTTT\n")
+    assert list(read_headers(p)) == ["a:1-10#LTR", "b"]
+
+
+def test_read_headers_agrees_with_read_fasta_on_every_id(tmp_path):
+    """The pre-pass and the classifying pass must see the same records in the
+    same order, or a locus would be harvested for the wrong element."""
+    p = tmp_path / "x.fa"
+    p.write_text(">a\nACGT\n>a\nGGGG\n>\nTTTT\n>c\n\n")
+    assert list(read_headers(p)) == [sid for sid, _ in read_fasta(p)]
+
+
+def test_read_headers_reads_gzip(tmp_path):
+    p = tmp_path / "x.fa.gz"
+    with gzip.open(p, "wt") as fh:
+        fh.write(">a\nACGT\n>b\nGGGG\n")
+    assert list(read_headers(p)) == ["a", "b"]

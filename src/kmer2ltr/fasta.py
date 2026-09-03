@@ -83,3 +83,18 @@ def read_fasta(path) -> Iterator[tuple[str, str]]:
     """
     for seq_id, seq, _raw in read_fasta_raw(path):
         yield seq_id, seq
+
+
+def read_headers(path) -> Iterator[str]:
+    """Yield just the record ids, assembling no sequence at all.
+
+    `--genome` has to know every locus before the first record is classified,
+    and the sequences are the expensive part of that pass: on a 68 Mbp element
+    set they would be built, joined and immediately discarded. Ids are split
+    exactly as `read_fasta_raw` splits them, so the two passes agree record for
+    record -- a disagreement would harvest one element's locus for another's
+    sequence.
+    """
+    for line in _open(path):
+        if line.startswith(">"):
+            yield line[1:].strip().split(None, 1)[0] if line[1:].strip() else ""

@@ -110,6 +110,28 @@ def test_shift_locus_declines_when_the_trim_would_invert_the_interval():
     assert shift_locus("chr1:100-200", 500, 0) == "chr1:100-200"
 
 
+def test_shift_locus_swaps_the_ends_for_a_reverse_complemented_record():
+    """A record stored reverse-complemented has its 5' terminus at the header's
+    `end`, so the 5' trim comes off `end` and the 3' trim off `start`. Applying
+    them the forward way translates the whole interval by `trim5 - trim3` while
+    leaving its length right, which is exactly the kind of error that survives a
+    length check."""
+    assert shift_locus("chr1:1000-2000", 40, 25, "-") == "chr1:1025-1960"
+
+
+def test_shift_locus_defaults_to_forward_so_nothing_moves_without_a_genome():
+    assert shift_locus("chr1:1000-2000", 40, 25) == shift_locus("chr1:1000-2000", 40, 25, "+")
+
+
+def test_shift_locus_is_orientation_blind_when_the_two_trims_are_equal():
+    assert (shift_locus("chr1:1000-2000", 7, 7, "-")
+            == shift_locus("chr1:1000-2000", 7, 7, "+") == "chr1:1007-1993")
+
+
+def test_shift_locus_still_declines_an_inverted_interval_when_reversed():
+    assert shift_locus("chr1:100-200", 0, 500, "-") == "chr1:100-200"
+
+
 def test_fasta_record_wraps_and_survives_an_empty_sequence():
     assert fasta_record("h", "ACGTAC", wrap=4) == ">h\nACGT\nAC\n"
     assert fasta_record("h", "") == ">h\n\n"

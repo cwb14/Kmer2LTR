@@ -354,3 +354,199 @@ def test_the_internal_fasta_survives_an_incomplete_clustering(tmp_path, monkeypa
     rc = main([str(inp), "-o", str(tmp_path / "o.tsv"), "--internal-cluster"])
     assert rc == 1
     assert (tmp_path / "o.internal.fa").exists(), "scratch dropped mid-sweep"
+
+
+# --------------------------------------------------------------------------- #
+# --genome
+# --------------------------------------------------------------------------- #
+
+_COMP = str.maketrans("ACGT", "TGCA")
+
+
+def _rc(s):
+    return s.translate(_COMP)[::-1]
+
+
+def _placed(tmp_path, tsd="ACGTA", pad=(0, 0), reverse=False, n=3):
+    """A reference, and an element FASTA cut out of it at known loci.
+
+    Each planted record is `pad[0]` bases of genome, an element, and `pad[1]`
+    more, with a real target-site duplication wrapped around the whole record --
+    so the duplication is readable only from the reference, which is the point
+    of the flag. Pass a `(left, right)` pair for `tsd` to plant flanks that do
+    not match. `reverse` stores the record on the other strand while leaving
+    forward coordinates in its header, as annotation pipelines do.
+    """
+    left, right = (tsd, tsd) if isinstance(tsd, str) else tsd
+    parts, loci = [], []
+    pos = 0
+    for i in range(n):
+        lead = _rnd(500, 900 + i)
+        ltr = _rnd(300, 100 + i)
+        rec = (_rnd(pad[0], 300 + i) + ltr + _rnd(600, 200 + i) + ltr
+               + _rnd(pad[1], 400 + i))
+        parts.append(lead + left + rec + right)
+        start = pos + len(lead) + len(left) + 1       # 1-based, record only
+        loci.append((start, start + len(rec) - 1))
+        pos += len(lead) + len(left) + len(right) + len(rec)
+    ref_seq = "".join(parts)
+
+    g = tmp_path / "ref.fa"
+    with open(g, "w") as fh:
+        fh.write(">c1 test contig\n")
+        for i in range(0, len(ref_seq), 60):
+            fh.write(ref_seq[i:i + 60] + "\n")
+    fa = tmp_path / "elements.fa"
+    with open(fa, "w") as fh:
+        for s1, e1 in loci:
+            piece = ref_seq[s1 - 1:e1]
+            fh.write(f">c1:{s1}-{e1}#LTR/Copia\n"
+                     f"{_rc(piece) if reverse else piece}\n")
+    return fa, g
+
+
+def _col(path, name):
+    lines = path.read_text().rstrip("\n").split("\n")
+    i = lines[0].split("\t").index(name)
+    return [l.split("\t")[i] for l in lines[1:]]
+
+
+def test_genome_adds_the_columns_without_moving_any_other_field(tmp_path):
+    """The reference adds information; at the default --tsd-anchor it must not
+    move a single boundary."""
+    fa, g = _placed(tmp_path)
+    a, b = tmp_path / "a.tsv", tmp_path / "b.tsv"
+    assert main([str(fa), "-o", str(a)]) == 0
+    assert main([str(fa), "-o", str(b), "--genome", str(g)]) == 0
+    la = a.read_text().rstrip("\n").split("\n")
+    lb = b.read_text().rstrip("\n").split("\n")
+    assert len(la) == len(lb)
+    for x, y in zip(la, lb):
+        assert x.split("\t")[:25] == y.split("\t")[:25]
+    assert _col(a, "tsd") == ["NA"] * 3
+    assert all("ACGTA" in v for v in _col(b, "tsd"))
+    assert _col(b, "tsd") == _col(b, "tsd_input")     # no flank was called
+    assert _col(b, "orientation") == ["+"] * 3
+
+
+def test_a_reverse_complemented_record_is_reported_as_such(tmp_path):
+    fa, g = _placed(tmp_path, reverse=True)
+    out = tmp_path / "o.tsv"
+    assert main([str(fa), "-o", str(out), "--genome", str(g)]) == 0
+    assert _col(out, "orientation") == ["-"] * 3
+    assert all(_rc("ACGTA") in v for v in _col(out, "tsd"))
+
+
+def test_the_two_tsd_columns_separate_when_a_flank_is_called(tmp_path):
+    fa, g = _placed(tmp_path, pad=(40, 40))
+    out = tmp_path / "o.tsv"
+    assert main([str(fa), "-o", str(out), "--genome", str(g)]) == 0
+    assert all(int(v) > 0 for v in _col(out, "flank5_len"))
+    assert all("ACGTA" in v for v in _col(out, "tsd_input"))   # as supplied
+    assert _col(out, "tsd") == ["."] * 3                       # not where it cut
+
+
+def test_trim_flanks_takes_the_five_prime_trim_off_end_when_reversed(tmp_path):
+    """The header carries forward coordinates; a reversed record's 5' terminus
+    is at `end`, so an asymmetric trim must move the far coordinate."""
+    from kmer2ltr.extras import shift_locus
+    fa, g = _placed(tmp_path, pad=(60, 15), reverse=True, n=1)
+    out = tmp_path / "o.tsv"
+    assert main([str(fa), "-o", str(out), "--genome", str(g), "--trim-flanks"]) == 0
+    header = [l[1:] for l in (tmp_path / "o.trimmed.fa").read_text().split("\n")
+              if l.startswith(">")][0]
+    orig = [l[1:] for l in fa.read_text().split("\n") if l.startswith(">")][0]
+    f5, f3 = int(_col(out, "flank5_len")[0]), int(_col(out, "flank3_len")[0])
+    assert f5 != f3 and f5 and f3
+    assert header == shift_locus(orig, f5, f3, "-")
+    assert header != shift_locus(orig, f5, f3, "+")
+
+
+def test_records_with_no_locus_in_the_header_report_NA(tmp_path):
+    fa, g = _placed(tmp_path, n=1)
+    plain = tmp_path / "plain.fa"
+    plain.write_text(fa.read_text().replace(">c1:", ">elem_"))
+    out = tmp_path / "o.tsv"
+    assert main([str(plain), "-o", str(out), "--genome", str(g)]) == 0
+    assert _col(out, "orientation") == ["NA"]
+    assert _col(out, "tsd") == ["NA"] and _col(out, "tsd_input") == ["NA"]
+
+
+def test_a_locus_on_a_contig_the_reference_lacks_reports_NA(tmp_path):
+    fa, g = _placed(tmp_path, n=1)
+    other = tmp_path / "other.fa"
+    other.write_text(fa.read_text().replace(">c1:", ">nope:"))
+    out = tmp_path / "o.tsv"
+    assert main([str(other), "-o", str(out), "--genome", str(g)]) == 0
+    assert _col(out, "orientation") == ["NA"]
+
+
+def test_tsd_anchor_needs_a_genome(tmp_path, capsys):
+    fa, _g = _placed(tmp_path, n=1)
+    assert main([str(fa), "-o", str(tmp_path / "o.tsv"), "--tsd-anchor", "8"]) == 2
+    assert "--tsd-anchor needs --genome" in capsys.readouterr().err
+
+
+def test_a_negative_tsd_anchor_is_refused(tmp_path, capsys):
+    fa, g = _placed(tmp_path, n=1)
+    assert main([str(fa), "-o", str(tmp_path / "o.tsv"),
+                 "--genome", str(g), "--tsd-anchor", "-1"]) == 2
+    assert "--tsd-anchor must be >= 0" in capsys.readouterr().err
+
+
+def test_a_missing_genome_is_refused(tmp_path, capsys):
+    fa, _g = _placed(tmp_path, n=1)
+    assert main([str(fa), "-o", str(tmp_path / "o.tsv"),
+                 "--genome", str(tmp_path / "nope.fa")]) == 2
+    assert "--genome file not found" in capsys.readouterr().err
+
+
+def test_an_output_that_would_land_on_the_reference_is_refused(tmp_path, capsys):
+    """Outputs are opened for writing before the reference is read, so naming
+    one as the other would destroy it."""
+    fa, g = _placed(tmp_path, n=1)
+    assert main([str(fa), "-o", str(g), "--genome", str(g)]) == 2
+    assert "would be written to an input file" in capsys.readouterr().err
+
+
+def test_the_genome_columns_are_thread_count_independent(tmp_path):
+    fa, g = _placed(tmp_path, n=6)
+    a, b = tmp_path / "a.tsv", tmp_path / "b.tsv"
+    assert main([str(fa), "-o", str(a), "--genome", str(g), "-t", "1"]) == 0
+    assert main([str(fa), "-o", str(b), "--genome", str(g), "-t", "3"]) == 0
+    assert a.read_text() == b.read_text()
+
+
+def test_tsd_anchor_suppresses_a_flank_the_duplication_argues_against(tmp_path):
+    fa, g = _placed(tmp_path, pad=(40, 40), n=2)
+    off, on = tmp_path / "off.tsv", tmp_path / "on.tsv"
+    assert main([str(fa), "-o", str(off), "--genome", str(g)]) == 0
+    assert main([str(fa), "-o", str(on), "--genome", str(g),
+                 "--tsd-anchor", "1e6"]) == 0
+    assert all(int(v) > 0 for v in _col(off, "flank5_len"))
+    assert all(int(v) == 0 for v in _col(on, "flank5_len"))
+    assert all(int(v) == 0 for v in _col(on, "flank3_len"))
+
+
+def test_tsd_anchor_does_nothing_where_no_duplication_backs_the_record(tmp_path):
+    """The credit is paid for evidence, not for the flag being on."""
+    fa, g = _placed(tmp_path, tsd=("ACGTA", "GGTCC"), pad=(40, 40), n=2)
+    off, on = tmp_path / "off.tsv", tmp_path / "on.tsv"
+    assert main([str(fa), "-o", str(off), "--genome", str(g)]) == 0
+    assert main([str(fa), "-o", str(on), "--genome", str(g),
+                 "--tsd-anchor", "1e6"]) == 0
+    assert _col(off, "tsd_input") == ["."] * 2
+    assert _col(off, "flank5_len") == _col(on, "flank5_len")
+    assert _col(off, "flank3_len") == _col(on, "flank3_len")
+
+
+def test_resume_reproduces_an_uninterrupted_run_with_a_genome(tmp_path):
+    """The reference is harvested for every locus before any record is skipped,
+    so a resumed run sees the same context an uninterrupted one did."""
+    fa, g = _placed(tmp_path, pad=(20, 20), n=5)
+    whole, part = tmp_path / "whole.tsv", tmp_path / "part.tsv"
+    assert main([str(fa), "-o", str(whole), "--genome", str(g)]) == 0
+    lines = whole.read_text().split("\n")
+    part.write_text("\n".join(lines[:3]) + "\n")          # header + 2 records
+    assert main([str(fa), "-o", str(part), "--genome", str(g), "--resume"]) == 0
+    assert part.read_text() == whole.read_text()

@@ -29,7 +29,8 @@ element. This is reported through the coordinates themselves, not a separate mec
 
 **Input:** one FASTA file, plain or gzip, read as a stream. Records may be wrapped or
 unwrapped, may contain whitespace inside sequence lines, IUPAC ambiguity codes, mixed
-case, and duplicate IDs.
+case, and duplicate IDs. Optionally one or more reference FASTAs (`--genome`), also plain
+or gzip, also streamed; see Stage 6.
 
 **Output:** one TSV, exactly **one row per input record, in input order, always.**
 Line count of the output body equals record count of the input. Nothing is silently
@@ -48,7 +49,8 @@ the header retained the original genomic interval). **In the TSV, headers are tr
 opaque identifiers and are never parsed for coordinates.** All output coordinates are
 offsets into the supplied sequence.
 
-The single exception is `--trim-flanks`, which exists to hand the input back corrected and
+The two exceptions are Stage 6, which needs the coordinates to find the record in a
+reference, and `--trim-flanks`, which exists to hand the input back corrected and
 so must correct the header too. It parses `chrom:start-end` (`..` accepted for `-`) in
 either of the two placements the common producers emit — `chr1:1000-2000#LTR/Gypsy`, and
 `bedtools getfasta -name`'s `TE_1#LTR/Copia::chr1:1000-2000`, where the `#` sits in the
@@ -56,7 +58,17 @@ middle and the locus is past it — and shifts each end inwards by the called fl
 Both are needed: a header left unchanged over a sequence that *was* trimmed is a header
 that lies about its own span. It is otherwise deliberately strict: a header that matches
 neither shape exactly — including an ambiguous three-part range — is emitted unchanged
-rather than guessed at, and no TSV column is affected either way.
+rather than guessed at, and columns 1-25 are unaffected either way.
+
+Which end each trim applies to depends on how the record is stored. A record
+reverse-complemented relative to its header has its 5' terminus at `end`, so the 5' trim
+comes off `end` and the 3' trim off `start`; applying them the forward way translates the
+interval by `flank5_len - flank3_len` while leaving its length correct, which is an error
+no length check can see. Nothing in a sequence reveals its own storage orientation, so
+without `--genome` forward storage is assumed — the behaviour every earlier version had.
+Measured on real annotation output, 30.7% of an *Arabidopsis* set and 9.9% of a human set
+are stored reversed, and 805/10,259 and 416/16,164 `--trim-flanks` headers change under the
+fix (7.85% and 2.57%, mean displacement 25.9 and 38.5 bp, max 1,411 and 1,089).
 
 **Optional outputs.** Beyond the TSV, and all off by default, all named after `-o`:
 boundary-corrected elements, IUPAC consensus LTRs and their mmseqs clustering, the same
@@ -606,14 +618,63 @@ Two things are done instead:
    trimming sites from *every* element, and it keeps the tool's behaviour visible rather
    than hidden inside the estimator.
 
+### Stage 6 — genomic context (optional, `--genome`)
+
+Off unless a reference is given, and it never runs before Stages 1-5: the pair is located
+without a reference and would be located identically with one. What the reference adds is
+three things the record cannot say about itself.
+
+**One streaming pass, no index.** Every locus is collected in a header-only pre-pass, then
+each reference file is read once, line by line against a rolling offset, cutting only four
+short windows per locus: the `PAD` bases before the interval, its first and last `PROBE`
+bases, and the `PAD` bases after. A contig is never materialised, so a 3.2 Gbp reference
+costs what a 100 Mbp one does — one sequential read and a few megabytes. This is why there
+is no `.fai` requirement: a gzipped reference cannot be seeked, and demanding `bgzip` of a
+user who has a plain `.gz` would be a real cost to avoid a notional one.
+
+**Orientation, anchored per end.** The record's first `PROBE` bases are scored against the
+reference at `start` and against the reverse complement of the reference at `end`, and its
+last `PROBE` bases likewise; the better hypothesis wins. Each end carries its own anchor
+flag. Anchoring the ends independently is not fussiness: 14.6% of an *Arabidopsis*
+annotation set and 29.1% of a human one are *shorter* than their header span, because a
+nested inner element was excised while the header kept the outer interval. Their middles do
+not correspond to the reference; both termini still do. An end that fails to anchor has its
+pad replaced by `N`, which needs no special case downstream — the TSD search already
+refuses any k-mer containing one.
+
+**Target-site duplications.** A TSD is the few genomic bases a staggered insertion leaves
+on both sides of the element. It lies *outside* the element, so without a reference it can
+only be looked for where a flank was called — precisely the boundaries that are least
+certain. `tsd` is read off the boundary Stage 3 settled on, `tsd_input` off the record's
+own termini; they coincide whenever no flank was called and separate exactly where the tool
+and the annotator disagree. Both are read off the answer and neither is used to find it,
+which is what keeps them usable as external checks — the same discipline `motif` is under.
+
+**`--tsd-anchor` is the one place that discipline can be spent, and it is off by default.**
+It turns a duplication at the record's own termini into extra bits of evidence against
+calling a flank there, added to `t_bits` *after* `effective_t_bits`'s cap — the cap
+describes what the flank itself could supply, and this is evidence from outside the
+sequence. Two properties bound it. It fires only at shift zero, so it never searches for a
+nearby TSD-like thing. And Stage 3's binary snap returns the whole candidate flank or none
+of it, so **the only outer boundary it can produce is the sequence terminus** -- it cannot
+put `ltr5_start` or `ltr3_end` anywhere else.
+
+That bound covers the outer boundaries and not the rest of the row. Accepting an extension
+also carries the opposite LTR's *inner* boundary outwards by the partner alignment's extent
+(`l3b -= k_in`, `l5e += k_in` in `snap_bounds`), so `ltr5_len`, `ltr3_len`, `identity` and
+`k2p` all move with it. Note also that one duplication is worth `--tsd-anchor` bits at each
+of the two ends independently, so the evidence spent on an element is twice the flag's
+value; both are reasons the flag is a knob to be measured rather than a default, and §6.10
+is why the measurement leaves it at zero.
+
 ## 4. Output columns
 
 ```
 1  seq_id        7  ltr3_end     13 n_sites     19 k2p                25 k2p_time
-2  seq_len       8  ltr5_len     14 n_ts        20 k2p_se
-3  status        9  ltr3_len     15 n_tv        21 bitscore
-4  ltr5_start   10  flank5_len   16 n_gapcols   22 flank_margin_bits
-5  ltr5_end     11  flank3_len   17 identity    23 cigar
+2  seq_len       8  ltr5_len     14 n_ts        20 k2p_se             26 orientation
+3  status        9  ltr3_len     15 n_tv        21 bitscore           27 tsd
+4  ltr5_start   10  flank5_len   16 n_gapcols   22 flank_margin_bits  28 tsd_offset
+5  ltr5_end     11  flank3_len   17 identity    23 cigar              29 tsd_input
 6  ltr3_start   12  aln_len      18 p_dist      24 motif
 ```
 
@@ -641,15 +702,32 @@ species, not of the software, and a silently-assumed one rescales every age in t
 row; a test pins that.
 
 `flank_margin_bits` reports the smaller of the two Stage 3 decision margins,
-`min(|s5 + T|, |s3 + T|)` in bits: how decisively the boundary call was made. Large values
+`min(|s5 + T|, |s3 + T|)` in bits: how decisively the boundary call was made. `T`
+is the threshold the decision was actually taken against, so under a non-zero
+`--tsd-anchor` it includes that credit — the column keeps describing the call
+that was made rather than the one that would have been. Large values
 mean the call was unambiguous; values near zero mark elements whose boundaries sit at the
 detection floor and which a cautious downstream analysis may wish to exclude.
+
+Columns 26-29 need `--genome` and are `NA` without it. `orientation` is `+` or `-` for the
+record against its own header coordinates. `tsd` and `tsd_input` are the duplication at the
+called boundary and at the record's termini as supplied, uppercase, or `.` where the search
+ran and found none. `tsd_offset` is `d5,d3` — how far each boundary had to move for `tsd`
+to appear, positive being *into* the element — and `NA` where `tsd` is `.`.
+
+`.` and `NA` are different claims and the distinction is load-bearing: `.` means the search
+ran and there is no duplication there, `NA` means it could not run — no reference, no locus
+in the header, no such contig, or an end that did not anchor.
 
 `status` values: `pass`, `weak_pair`, `no_pair`, `too_short`, `all_ambiguous`,
 `k2p_undefined`.
 
 `no_pair`, `too_short` and `all_ambiguous` rows carry `NA` in every data column — no LTR
-pair was located, so there is nothing to report.
+pair was located, so there is nothing to report. **`orientation` and `tsd_input` are the
+exception**, and deliberately: they are properties of the record rather than of a pair, and
+on a row where no pair was found they are the only remaining evidence about whether the
+annotator was pointing at a real insertion at all. `tsd` and `tsd_offset` are read off
+called boundaries, so they follow the general rule.
 
 **`weak_pair` is the significance gate declining to destroy a measurement.** A pair was
 located, its boundaries settled and its divergence measured, and only then did the
@@ -699,6 +777,7 @@ Kmer2LTR/
 │   ├── k2p.py distance, variance, insertion time
 │   ├── cigar.py extended CIGAR and cs emission
 │   ├── extras.py derived records: consensus, internal, perfect, trimmed
+│   ├── genome.py Stage 6: reference windows, orientation, TSDs
 │   ├── cluster.py mmseqs2 identity sweep
 │   ├── plot.py K2P density figure
 │   └── runner.py parallel driver, ordered writer, resume
@@ -706,7 +785,7 @@ Kmer2LTR/
 └── bench/          build_truth · simulate · run_bench · figures
 ```
 
-**CLI:** `Kmer2LTR [-o OUT] [-u RATE] [--cs] [-t 20] [--resume] [-v] input.fa[.gz]`
+**CLI:** `Kmer2LTR [-o OUT] [-u RATE] [--cs] [-t 20] [--genome REF] [--resume] [-v] input.fa[.gz]`
 
 **The optional outputs are re-implementations, not ports.** The consensus LTR in particular
 is free here: `classify` already holds the exact WFA global alignment of the final pair, so
@@ -966,11 +1045,61 @@ pytest with tiny synthetic fixtures (not real data):
 - Window growth: element whose LTR exceeds the initial window.
 - Nested element -> outer pair reported.
 - Coordinate convention: 1-based inclusive, verified by slicing the input sequence.
+- `--genome` against a miniature reference: the four window cuts at their exact
+  offsets, contig-edge clipping, overlapping and nested requests, gzip, a
+  soft-masked reference, a multi-file reference, and a contig the reference lacks.
+- Orientation forward and reverse, with a middle excised, with bases lost off one
+  terminus (that end reported unanchored), and refused where the record is not
+  where the header says.
+- TSD found, absent, off by one, refused for a homopolymer or an ambiguity code;
+  a zero-shift hit preferred over a longer shifted one.
+- `shift_locus` reversed, and the invariant that columns 1-25 are byte-identical
+  with and without `--genome` at the default `--tsd-anchor`.
 
 ### 6.9 Compute
 
 Benchmark jobs assume 20 cores; the launchers in `bench/` take `REPO`, `DATA` and `PY`
 from the environment. Results are recorded in `docs/benchmarks.md`.
+
+### 6.10 Genomic context, and why `--tsd-anchor` ships at zero
+
+The call sets this stage was built against are pooled output from two detectors with
+incompatible boundary conventions, and that is not a detail — it decides the answer.
+LTRharvest ran `-mintsd 0 -maxtsd 0` with no `-motif`, so it has never consulted a terminal
+motif or a target-site duplication; LTR_FINDER places its boundaries on both. Every element
+was assigned to its detector by exact interval match against the stitched SCN files, which
+resolves 10,307 of 10,307 on the *Arabidopsis* set: 4,183 LTRharvest-only (`TG`...`CA` at
+its own boundary 1.65% of the time), 5,594 LTR_FINDER-only (85.04%), 530 both (97.92%).
+
+**Every motif- or TSD-scored statistic is therefore reported per source and never summed.**
+For the 3,185 records where a flank is called, a genomic duplication sits at the
+annotator's boundary 23.1% of the time and at the one Kmer2LTR settled on 19.2% — pooled,
+no signal at all. Split, LTRharvest says Kmer2LTR's boundary is right (23.2% against
+10.0%, over a 2.5% shift-matched control) and LTR_FINDER says the annotator's is (39.1%
+against 14.2%). Each half reverses the other and the aggregate erases both.
+
+The two halves are not equally credible, which is what settles it: LTR_FINDER *placed* its
+boundaries on duplications, so its column restates its own criterion and is not evidence
+about anything. LTRharvest's is clean, and it favours the trimmed boundary 2.3 to 1.
+
+`--tsd-anchor` was then measured over six settings from 0 to unbounded. In the only
+uncontaminated subgroup — LTRharvest elements carrying a duplication at their termini,
+n=1,123, the records where the flag fires at all — going from 0 to unbounded moves 2.8% of
+them from flanked to unflanked and leaves the terminal-motif rate flat and marginally down,
+0.0338 -> 0.0331. On the one signal the flag cannot see, it buys nothing. The stratum where
+it appears to work (LTR_FINDER's motif rate, +3.1 points) is circular, since LTR_FINDER put
+those termini on `TG`...`CA` in the first place. **The default is 0**, and the flag exists
+so that claim is reproducible rather than asserted.
+
+Two by-products of the same grid are worth keeping. Records with no duplication at their
+termini have an identical flank rate at every setting (0.3655 and 0.5245 at 0, 4, 8, 12, 20
+and unbounded alike), so the credit is paid only for evidence. And Kmer2LTR already agrees
+with the duplication without being told about it: among LTRharvest elements carrying one it
+calls no flank on 84.2% against 47.6% for those without — a 37-point separation using a
+signal it never reads.
+
+Full tables, the parameter sweep behind `TSD_K`, `TSD_SHIFTS` and the orientation probe, and
+the shift-budget-matched controls: `docs/benchmarks.md`.
 
 ## 7. Known limits — to be measured, not assumed
 

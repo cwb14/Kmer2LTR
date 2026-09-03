@@ -348,7 +348,8 @@ class Bounds:
 
 def _extend(outer: str, inner: str, matrix, gaps: Gaps, t_bits: float,
             graded: bool, alpha: float | None = None,
-            beta: float | None = None) -> tuple[int, int, float]:
+            beta: float | None = None,
+            credit: float = 0.0) -> tuple[int, int, float]:
     """One anchored outward extension of an alignment end.
 
     `outer` is the candidate flank, consumed from the core outward; `inner` is
@@ -360,6 +361,11 @@ def _extend(outer: str, inner: str, matrix, gaps: Gaps, t_bits: float,
     boundary moves, and how decisively the call was made. `k_outer ==
     len(outer)` means the boundary snapped all the way to the sequence terminus.
 
+    `credit` is evidence from outside the sequence that this terminus is already
+    the element's boundary, in bits. It raises what the extension is allowed to
+    cost and can therefore only ever move the boundary further out; in binary
+    mode "further out" means the sequence terminus and nothing else.
+
     Binary mode is the shipped rule: consume the whole flank iff doing so costs
     less than `t_bits` (under the penalised objective `score - T*(free ends)`,
     that is `s_full > -T`). Graded mode instead takes the furthest endpoint
@@ -368,7 +374,9 @@ def _extend(outer: str, inner: str, matrix, gaps: Gaps, t_bits: float,
     """
     if not outer or not inner:
         return 0, 0, None
-    t_bits = effective_t_bits(t_bits, len(outer), alpha, beta)
+    # The cap describes how much evidence the flank itself could ever supply;
+    # `credit` is evidence from outside the sequence, so it is added after.
+    t_bits = effective_t_bits(t_bits, len(outer), alpha, beta) + credit
     n_ref = min(len(inner), 2 * len(outer) + EXT_REF_SLACK)
     inner = inner[:n_ref]
     res = parasail.sg_de_striped_sat(outer, inner, gaps.open, gaps.extend, matrix)
@@ -449,7 +457,8 @@ def _joint_inner(S: str, b: Bounds, matrix, gaps: Gaps) -> Bounds:
 
 def snap_bounds(S: str, spans, matrix, gaps: Gaps = SIG_GAPS, t_bits: float = T_BITS,
                 *, mode: str = "binary", inner: str = "none",
-                alpha: float | None = None, beta: float | None = None) -> Bounds:
+                alpha: float | None = None, beta: float | None = None,
+                credit: float = 0.0) -> Bounds:
     """Decide, per terminus, whether homology reaches the end of the sequence.
 
     Exact model comparison rather than a greedy endpoint: extending the core to
@@ -474,7 +483,7 @@ def snap_bounds(S: str, spans, matrix, gaps: Gaps = SIG_GAPS, t_bits: float = T_
     # the alignment. Reversed so index 0 is adjacent to the core.
     if l5b > 0 and l3b > l5e + 1:
         k_out, k_in, m = _extend(S[:l5b][::-1], S[l5e + 1:l3b][::-1],
-                                 matrix, gaps, t_bits, graded, alpha, beta)
+                                 matrix, gaps, t_bits, graded, alpha, beta, credit)
         if m is not None:
             margins.append(m)
         l5b -= k_out
@@ -484,7 +493,7 @@ def snap_bounds(S: str, spans, matrix, gaps: Gaps = SIG_GAPS, t_bits: float = T_
     # outward from the core, so no reversal.
     if l3e < L - 1 and l3b > l5e + 1:
         k_out, k_in, m = _extend(S[l3e + 1:], S[l5e + 1:l3b],
-                                 matrix, gaps, t_bits, graded, alpha, beta)
+                                 matrix, gaps, t_bits, graded, alpha, beta, credit)
         if m is not None:
             margins.append(m)
         l3e += k_out
@@ -504,10 +513,11 @@ def snap_bounds(S: str, spans, matrix, gaps: Gaps = SIG_GAPS, t_bits: float = T_
 def terminal_snap(S: str, hit: Hit, matrix, t_bits: float = T_BITS,
                   gaps: Gaps = SIG_GAPS, *, mode: str = "binary",
                   inner: str = "none", alpha: float | None = None,
-                  beta: float | None = None) -> Bounds:
+                  beta: float | None = None, credit: float = 0.0) -> Bounds:
     """`snap_bounds` for a caller holding a `Hit` (the Stage 1 entry point)."""
     return snap_bounds(S, ltr_spans(S, hit), matrix, gaps, t_bits,
-                       mode=mode, inner=inner, alpha=alpha, beta=beta)
+                       mode=mode, inner=inner, alpha=alpha, beta=beta,
+                       credit=credit)
 
 
 # --------------------------------------------------------------------------- #
@@ -608,6 +618,13 @@ class Result:
     # `cut -f1,4-7,19,23` still selects the same fields.
     motif: str | None           # e.g. "tg...ca": the two terminal dinucleotides
     k2p_time: int | None        # years since insertion; needs a mutation rate
+    # Appended for the same reason, and filled by `genome.annotate` rather than
+    # here: locating an LTR pair needs no reference, and every one of these is
+    # `None` unless `--genome` was given.
+    orientation: str | None     # '+'/'-' of the record against its header locus
+    tsd: str | None             # target-site duplication at the called boundary
+    tsd_offset: str | None      # "d5,d3": the shift at which `tsd` was found
+    tsd_input: str | None       # the same, at the record's termini as supplied
 
 
 _N_DATA_FIELDS = len(fields(Result)) - 3   # everything after seq_id/seq_len/status
@@ -650,6 +667,11 @@ def classify(seq_id: str, S: str, **kw) -> Result:
     `mutation_rate` (substitutions per site per year) turns the divergence into
     a `k2p_time` in years; without it that column is `None`.
 
+    `tsd_credit` is external evidence, in bits, that the sequence's own termini
+    are already the element's boundaries -- `--tsd-anchor` turns a genomic
+    target-site duplication into it. It is a plain number here on purpose: this
+    module locates LTR pairs and has no business knowing what a genome is.
+
     Keyword knobs after `min_bitscore` drive the benchmark ablations; their
     defaults reproduce production behaviour. See `_classify` for the full
     signature -- this wrapper exists only to keep the public return type a
@@ -667,7 +689,8 @@ def _classify(seq_id: str, S: str, *, cs: bool = False, t_bits: float | None = N
               comp: str = "element", gap_scheme: str = "adaptive",
               keep_weak: bool = True, stage4_recal: bool = True,
               flank_sensitivity: str = "strict",
-              mutation_rate: float | None = None) -> tuple[Result, tuple[str, str] | None]:
+              mutation_rate: float | None = None,
+              tsd_credit: float = 0.0) -> tuple[Result, tuple[str, str] | None]:
     """`classify` plus the final aligned LTR pair.
 
     The pair is what `extras.py` builds the IUPAC consensus from. Returning it
@@ -710,7 +733,8 @@ def _classify(seq_id: str, S: str, *, cs: bool = False, t_bits: float | None = N
     spans = ltr_spans(S, hit)
     if use_stage3:
         bounds = snap_bounds(S, spans, matrix, gaps, tb, mode=snap_mode,
-                             inner=inner, alpha=alpha, beta=beta)
+                             inner=inner, alpha=alpha, beta=beta,
+                             credit=tsd_credit)
     else:
         bounds = Bounds(*spans, None)
 
@@ -728,7 +752,8 @@ def _classify(seq_id: str, S: str, *, cs: bool = False, t_bits: float | None = N
             if use_stage3:
                 bounds = snap_bounds(S, re_sp, cal2.matrix, cal2.gaps, tb2,
                                      mode=snap_mode, inner=inner,
-                                     alpha=cal2.alpha, beta=beta)
+                                     alpha=cal2.alpha, beta=beta,
+                                     credit=tsd_credit)
             else:
                 bounds = Bounds(*re_sp, outer.margin_bits)
             matrix, gaps = cal2.matrix, cal2.gaps
@@ -788,4 +813,5 @@ def _classify(seq_id: str, S: str, *, cs: bool = False, t_bits: float | None = N
         p_dist=pd, k2p=d, k2p_se=se, bitscore=bitscore,
         flank_margin_bits=bounds.margin_bits, cigar=aln_str,
         motif=motif, k2p_time=insertion_time(d, mutation_rate),
+        orientation=None, tsd=None, tsd_offset=None, tsd_input=None,
     ), (a, b))

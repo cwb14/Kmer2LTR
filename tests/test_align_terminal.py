@@ -85,3 +85,17 @@ def test_bounds_stay_ordered_and_in_range():
     S = _rnd(40, 18) + ltr + _rnd(800, 19) + ltr + _rnd(40, 20)
     b = _bounds(S)
     assert 0 <= b.l5b <= b.l5e < b.l3b <= b.l3e <= len(S) - 1
+
+
+def test_external_credit_reaches_the_terminal_snap_entry_point():
+    """`terminal_snap` is the Stage 1 entry point the benchmarks call; its
+    `credit` has to arrive at `_extend` the same way `snap_bounds`' does."""
+    ltr = _rnd(400, 71)
+    S = _rnd(40, 72) + ltr + _rnd(1200, 73) + _evolve(ltr, 0.1, 74) + _rnd(40, 75)
+    h = discover(S, GENERIC_MATRIX)
+    m, _, _ = calibrate(S, h)
+    h2 = discover(S, m) or h
+    tight = terminal_snap(S, h2, m)
+    loose = terminal_snap(S, h2, m, credit=1e6)
+    assert tight.l5b > 0 and tight.l3e < len(S) - 1
+    assert loose.l5b == 0 and loose.l3e == len(S) - 1

@@ -1,6 +1,8 @@
 import random
+from dataclasses import astuple, fields
+
 import pytest
-from kmer2ltr.align import classify
+from kmer2ltr.align import Result, classify
 from kmer2ltr.fasta import sanitize
 
 def _rnd(n, seed):
@@ -79,10 +81,9 @@ def test_cs_flag_switches_alignment_string():
     assert "=" in r_cig.cigar
     assert r_cs.cigar.startswith(":")
 
-def test_every_result_has_all_25_fields():
-    from dataclasses import fields
+def test_every_result_has_all_29_fields():
     r = classify("x", _rnd(3000, 18))
-    assert len(fields(r)) == 25
+    assert len(fields(r)) == 29
 
 def test_identity_and_p_dist_are_consistent():
     ltr = _rnd(600, 19)
@@ -150,3 +151,48 @@ def test_rows_without_a_pair_report_no_motif_and_no_time():
               classify("x", "N" * 500, mutation_rate=7e-9),
               classify("x", _rnd(3000, 45), mutation_rate=7e-9)):
         assert r.motif is None and r.k2p_time is None, r.status
+
+
+# --------------------------------------------------------------------------- #
+# Genome columns and the external-evidence credit
+# --------------------------------------------------------------------------- #
+
+def test_result_appends_the_genome_columns_after_k2p_time():
+    """They are appended, never inserted, so every documented `cut -f` recipe
+    still selects the same fields."""
+    names = [f.name for f in fields(Result)]
+    assert names[-5:] == ["k2p_time", "orientation", "tsd", "tsd_offset", "tsd_input"]
+    assert names.index("cigar") == 22
+    assert names.index("motif") == 23
+    assert names.index("k2p_time") == 24
+
+
+def test_the_genome_columns_start_empty():
+    ltr = _rnd(400, 21)
+    r = classify("x", ltr + _rnd(1200, 22) + ltr)
+    assert (r.orientation, r.tsd, r.tsd_offset, r.tsd_input) == (None, None, None, None)
+
+
+def test_zero_credit_reproduces_the_shipped_call_exactly():
+    ltr = _rnd(400, 23)
+    S = _rnd(40, 24) + ltr + _rnd(1200, 25) + _evolve(ltr, 0.1, 26) + _rnd(17, 27)
+    assert astuple(classify("x", S)) == astuple(classify("x", S, tsd_credit=0.0))
+
+
+def test_a_credit_pushes_a_boundary_out_to_the_terminus_and_nowhere_else():
+    """The binary snap returns the whole candidate flank or none of it, so
+    external evidence can move a boundary to the sequence end and to no other
+    position -- it cannot invent an interior boundary."""
+    ltr = _rnd(400, 28)
+    S = _rnd(40, 29) + ltr + _rnd(1200, 30) + _evolve(ltr, 0.1, 31) + _rnd(40, 32)
+    tight = classify("x", S)
+    loose = classify("x", S, tsd_credit=1e6)
+    assert tight.flank5_len > 0 and tight.flank3_len > 0
+    assert (loose.flank5_len, loose.flank3_len) == (0, 0)
+    assert loose.ltr5_start == 1 and loose.ltr3_end == loose.seq_len
+
+
+def test_a_credit_leaves_an_already_unflanked_element_alone():
+    ltr = _rnd(400, 33)
+    S = ltr + _rnd(1200, 34) + _evolve(ltr, 0.1, 35)
+    assert astuple(classify("x", S)) == astuple(classify("x", S, tsd_credit=1e6))

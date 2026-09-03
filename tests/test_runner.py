@@ -13,22 +13,23 @@ def _fasta(tmp_path, records, name="in.fa"):
     return p
 
 def test_columns_match_spec_order_and_count():
-    assert len(COLUMNS) == 25
+    assert len(COLUMNS) == 29
     assert COLUMNS[0] == "seq_id" and COLUMNS[2] == "status"
     assert COLUMNS[3:7] == ["ltr5_start", "ltr5_end", "ltr3_start", "ltr3_end"]
     assert COLUMNS[18] == "k2p" and COLUMNS[22] == "cigar"
 
 
-def test_motif_and_k2p_time_were_appended_after_the_columns_that_existed_before():
-    """`motif` and `k2p_time` sit AFTER `cigar` so that every column predating
-    them keeps its index -- the README's own `cut -f1,4-7,19,23` still selects
-    the same six fields, and no downstream script shifts by two."""
-    assert COLUMNS[23:] == ["motif", "k2p_time"]
+def test_later_columns_were_appended_after_the_ones_that_existed_before():
+    """Every addition sits AFTER `cigar` so that every column predating it keeps
+    its index -- the README's own `cut -f1,4-7,19,23` still selects the same six
+    fields, and no downstream script shifts."""
+    assert COLUMNS[23:25] == ["motif", "k2p_time"]
+    assert COLUMNS[25:] == ["orientation", "tsd", "tsd_offset", "tsd_input"]
 
 def test_format_row_renders_none_as_NA():
     r = classify("x", "ACGT" * 10)          # too_short -> all None
     fields = format_row(r).split("\t")
-    assert len(fields) == 25
+    assert len(fields) == 29
     assert fields[3] == "NA"
 
 def test_one_row_per_record_always(tmp_path):

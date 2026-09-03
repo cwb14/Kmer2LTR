@@ -346,6 +346,225 @@ alone cannot exclude, which has no reason to carry a retroviral terminus.
 
 ---
 
+## Genomic context (`--genome`)
+
+Measured on `arab_ltr_all_clean.fa.gz` (10,307 records, three *Arabidopsis*
+genomes: *thaliana* TAIR10.1, *arenosa* AARE701a, *halleri* UZH_hal_W302_1) and
+`human_ltr_all_clean.fa.gz` (16,336, GRCh38.p14), both produced by `ltrquest`.
+
+### The call set is two populations, and pooling them reverses the answer
+
+`ltrquest` runs two detectors with incompatible boundary conventions.
+**LTRharvest** ran `-mintsd 0 -maxtsd 0` with no `-motif`, so its boundaries are
+placed by homology alone and it has never looked at a terminal motif or a
+target-site duplication. **LTR_FINDER** snaps its boundaries *onto* both. Every
+element was assigned to its detector by exact interval match against the
+stitched SCN files — the FASTA header's `chrom:start-end` is the detector's own
+reported interval — which resolves **10,307 of 10,307** against 52,098 intervals
+from 20 files: 5,594 LTR_FINDER-only, 4,183 LTRharvest-only, 530 reported
+identically by both.
+
+`TG`…`CA` at the detector's own boundary, read straight off the record:
+
+| source | n | 5′ TG | 3′ CA | TG…CA |
+|---|---|---|---|---|
+| LTRharvest-only | 4,183 | 0.1554 | 0.1786 | **0.0165** |
+| LTR_FINDER-only | 5,594 | 0.9061 | 0.9124 | **0.8504** |
+| both | 530 | 0.9792 | 0.9811 | 0.9792 |
+| pooled | 10,307 | 0.6052 | 0.6181 | 0.5186 |
+
+A 52× difference. **Any motif- or TSD-scored statistic over the pooled set is a
+mixture of these two, and the mixture reverses each of them.** The clearest case
+is the question the TSD is there to answer — for the records where `Kmer2LTR`
+calls a flank, does an exact genomic duplication sit at the annotator's boundary
+or at the one `Kmer2LTR` settled on?
+
+| stratum | n | TSD @ annotator | TSD @ `Kmer2LTR` | control (+10 bp) |
+|---|---|---|---|---|
+| LTRharvest-only | 1,763 | 0.1004 | **0.2320** | 0.023–0.026 |
+| LTR_FINDER-only | 1,413 | **0.3914** | 0.1423 | 0.025–0.028 |
+| pooled | 3,185 | 0.2314 | 0.1915 | 0.0254 |
+
+Pooled, the two are within a few points of each other and the signal looks
+absent. Stratified, each half says the opposite of the other — Simpson's
+paradox, and a large one.
+
+**The two halves are not equally credible, and that is what settles it.**
+LTR_FINDER *placed* its boundaries on duplications, so its 0.3914 restates that
+tool's own criterion; it is not evidence about anything. LTRharvest never looked,
+so its column is clean — and it says `Kmer2LTR`'s trimmed boundary carries a real
+duplication **2.3× more often** than the annotator's did (10.0× above the
+shift-matched control against 3.8×). Every statistic in this section is therefore
+reported per source and never summed.
+
+### The duplication as an external check on the boundary
+
+At the shipped defaults, for records where no flank was called (so the annotator
+and `Kmer2LTR` agree on the boundary and the two columns are one measurement):
+
+| stratum | n | TSD present | control (+10 bp) | enrichment |
+|---|---|---|---|---|
+| both detectors agree | 521 | 0.9271 | 0.0230 | **40.2×** |
+| LTR_FINDER-only | 4,169 | 0.6419 | 0.0211 | **30.4×** |
+| LTRharvest-only | 2,384 | 0.3968 | 0.0180 | **22.0×** |
+| human (unsplit) | 11,183 | 0.1340 | 0.0175 | **7.6×** |
+
+The human rates are lower throughout for two compounding reasons: a far more
+repetitive genome raises the chance rate, and the annotator is plant-tuned, so
+the call set is noisier. The *ordering* of every parameter choice below is
+nevertheless identical on both, which is the portability check that matters.
+
+Note the top row. On the 530 elements two independent detectors placed
+identically — the only genuinely certain boundaries in the set — `Kmer2LTR`
+already reports no flank on 521 (98.3%), and 92.7% of those carry a genomic
+duplication. That is an accuracy statement about the boundary logic that owes
+nothing to either signal being used.
+
+### Parameter sweep
+
+96 cells over TSD length set × shift window × mismatch tolerance × complexity
+floor × search precedence, scored on `harvest|clean` — LTRharvest elements
+`Kmer2LTR` calls perfectly bounded, the one stratum where a duplication is
+evidence rather than restatement. Controls are **shift-budget matched**: a wider
+window tries more (k, d5, d3) combinations and finds more by chance, so the
+control runs the identical search displaced 10 bp outwards. `excess` = rate −
+control, the estimated true-positive rate.
+
+| k | shifts | floor | mismatch | rate | control | excess | enrichment |
+|---|---|---|---|---|---|---|---|
+| 6,5 | 0 | 2 | 0 | 0.1443 | 0.0046 | 0.1397 | 31.3× |
+| 6,5 | 0,±1 | 2 | 0 | 0.3968 | 0.0180 | **0.3788** | **22.0×** |
+| 6,5 | 0,±1,±2 | 2 | 0 | 0.4312 | 0.0419 | 0.3893 | 10.3× |
+| 6,5 | 0,±1 | 3 | 0 | 0.2802 | 0.0109 | 0.2693 | 25.7× |
+| 6,5 | 0 | 2 | 1 | 0.2013 | 0.0357 | 0.1657 | 5.6× |
+| 5 | 0,±1 | 2 | 0 | 0.3964 | 0.0164 | 0.3800 | 24.2× |
+| 7,6,5 | 0,±1 | 2 | 0 | 0.3981 | 0.0189 | 0.3792 | 21.1× |
+| 6,5,4 | 0 | 2 | 0 | 0.3087 | 0.0105 | 0.2982 | 29.4× |
+| 6,5,4 | 0,±1 | 2 | 0 | 0.4320 | 0.0499 | 0.3821 | 8.7× |
+
+Five findings, each of which sets one default.
+
+**Mismatch tolerance loses, and not marginally.** Allowing one mismatch raises
+the raw rate by 40% and the control by nearly eight-fold; enrichment collapses
+31.3× → 5.6× while the excess barely moves. A decayed duplication is a real
+thing, but it is not separable from chance at these lengths. **Exact only.**
+
+**The shift window is where the signal is, and it stops at ±1.** Widening from
+`{0}` to `{0,±1}` nearly triples the excess, 0.1397 → 0.3788, at an enrichment
+still above 20×. Widening again to `{0,±1,±2}` buys 2.8% more excess for 2.3×
+the false rate. **`{0,±1}` is the knee** — and it is the same window `ltrquest`
+itself searches, which is worth stating plainly: part of this gain is that the
+call set was *selected* through a ±1 window, so these records are enriched for
+duplications one base off the annotator's call. That does not make them less
+real, but it does mean ±1 will look less spectacular on a set assembled some
+other way.
+
+**k = 7 adds nothing** (excess 0.3792 vs 0.3788) and **k = 4 is redundant with
+the shift window, not additional to it.** Alone at zero shift, k = 4 doubles the
+excess (0.1397 → 0.2982); added to `{0,±1}` it adds nothing (0.3788 → 0.3821)
+while more than halving enrichment. The reason is mechanical: a genuine 5 bp
+duplication whose 3′ boundary is one base out appears as a 4 bp match at zero
+shift, so the two settings recover the same elements. The ±1 form is the better
+report — it names the full motif *and* says the boundary is a base off, where
+k = 4 reports a truncated motif at offset `0,0` and hides the error. **k = (6, 5).**
+
+**The complexity floor stays at two distinct bases.** Raising it to three lifts
+enrichment 22.0× → 25.7% but discards 29% of the excess. This column is a report,
+not a gate, so sensitivity at 22× enrichment is the better trade.
+
+**Search precedence changed nothing detected and everything reported.** Over all
+48 cell pairs, k-major and shift-major differ in detection rate in **zero** of
+them — they only disagree about which of several simultaneous matches to name.
+That freed the choice to be made on other grounds, so the shipped order is by
+increasing total boundary displacement (and longest k within it): when a 6 bp
+duplication fits if the boundary is a base out and a 5 bp one fits if it is
+exactly right, "the boundary is right" is the smaller claim. Re-running the
+arabidopsis set under it moved one reported motif in 10,307 and no detection.
+
+### Orientation: the parameters do not matter, which is the finding
+
+Probe length × identity threshold, both datasets:
+
+| probe | identity | arabidopsis decided | reverse | flips | human decided | reverse | flips |
+|---|---|---|---|---|---|---|---|
+| 24 | 0.85–1.00 | 10,306–10,307 / 10,307 | 3,153 | 0 | 16,335 / 16,336 | 1,602 | 0 |
+| 40 | 0.85–1.00 | 10,306 / 10,307 | 3,153 | 0 | 16,335–16,336 / 16,336 | 1,602–1,603 | 0 |
+| 60 | 0.85–1.00 | 10,306 / 10,307 | 3,153 | 0 | 16,335 / 16,336 | 1,602 | 0 |
+
+**Not one call flips anywhere in the grid**, and decidability moves by at most
+one record. A record either sits exactly on its header coordinates or nowhere
+near them — there is no middle ground for a threshold to sit in, because these
+are exact genomic slices, not alignments. The shipped `PROBE = 40`,
+`MIN_IDENTITY = 0.9` are therefore chosen for headroom rather than by
+optimisation.
+
+The counts themselves are the point: **30.6% of the *Arabidopsis* records and
+9.8% of the human ones are stored reverse-complemented** relative to their own
+headers. Independently confirmed by whole-record comparison against the source
+assemblies (3,153 and 1,602–1,603, matching exactly). Before this change
+`--trim-flanks` shifted both of their coordinates the wrong way, translating the
+interval by `flank5_len − flank3_len` while leaving its length correct: 805 of
+10,259 *Arabidopsis* headers (7.85%, mean 25.9 bp, max 1,411 bp) and 416 of
+16,164 human (2.57%, mean 38.5 bp, max 1,089 bp). Both counts come from the
+shipped code: they are the number of headers `shift_locus` now writes differently.
+
+**End-to-end check on the corrected headers.** For every record that *is* a
+contiguous slice of the reference — 8,767 *Arabidopsis* and 11,508 human, the
+rest being the nested-excised ones for which the question is not well posed — the
+trimmed sequence was compared against the genomic interval its new header names,
+under the orientation the run reported. **20,275 of 20,275 match; none is wrong.**
+That is the fix checked against the reference itself rather than against its own
+arithmetic.
+
+### `--tsd-anchor` ships at zero
+
+Six settings, 0 to unbounded, per source:
+
+| anchor | LTR_FINDER flanked | LTR_FINDER TG…CA | LTRharvest flanked | LTRharvest TG…CA |
+|---|---|---|---|---|
+| 0 | 0.2531 | 0.6992 | 0.4251 | 0.0321 |
+| 4 | 0.2340 | 0.7083 | 0.4234 | 0.0321 |
+| 8 | 0.2297 | 0.7112 | 0.4227 | 0.0318 |
+| 12 | 0.2272 | 0.7130 | 0.4215 | 0.0318 |
+| 20 | 0.2202 | 0.7182 | 0.4202 | 0.0318 |
+| ∞ | 0.2020 | 0.7306 | 0.4179 | 0.0319 |
+
+The flag looks like it works: the LTR_FINDER stratum's terminal-motif rate rises
+3.1 points as trims are suppressed. **It is not evidence.** LTR_FINDER placed
+those termini on `TG`…`CA` in the first place, so snapping boundaries back to
+them raises the motif rate mechanically, whatever the boundaries deserve.
+
+The uncontaminated test is the LTRharvest stratum, and within it only the records
+that carry a duplication at their termini — the ones where the flag fires at all,
+and where neither LTRharvest nor `Kmer2LTR` ever consulted the signal being used:
+
+| anchor | n | flanked | mean flank bp | TG…CA |
+|---|---|---|---|---|
+| 0 | 1,123 | 0.1576 | 9.6 | 0.0338 |
+| 8 | 1,123 | 0.1487 | 9.5 | 0.0329 |
+| 20 | 1,122 | 0.1390 | 9.3 | 0.0330 |
+| ∞ | 1,118 | 0.1297 | 8.1 | **0.0331** |
+
+Forcing those boundaries out to the record termini moves 2.8% of them from
+flanked to unflanked and leaves the terminal-motif rate **flat, marginally
+down** (0.0338 → 0.0331). On the one signal the flag cannot see, in the one
+stratum where the signal is honest, `--tsd-anchor` buys nothing. **The default
+is 0.**
+
+Two things fall out of the same table and are worth keeping.
+
+**The credit is paid only for evidence.** Records with no duplication at their
+termini have an identical flank rate at *every* anchor setting — 0.3655
+(LTR_FINDER) and 0.5245 (LTRharvest) at 0, 4, 8, 12, 20 and ∞ alike. Nothing
+moves that should not.
+
+**`Kmer2LTR` already agrees with the duplication without being told about it.**
+Among LTRharvest elements carrying one, it calls no flank on 84.2%; among those
+without, on 47.6%. For LTR_FINDER, 82.9% against 63.5%. The tool separates the
+two populations by 19 and 37 points using a signal it never reads.
+
+---
+
 ## Reproducing
 
 ```bash
@@ -356,7 +575,13 @@ python bench/run_bench.py --help            # ablation grid and scoring
 python bench/run_configs.py --help          # named pipeline configurations
 python bench/calibrate_flank_threshold.py --help
 python bench/report.py --help               # comparison tables
+python bench/genome_sweep.py --help         # the --genome parameter grid
 ```
+
+The genome sweep needs the annotator's `*.work/` directories to split by source;
+`bench/slurm_genome_sweep.sh` takes their location in `WORK`. Without it every
+element is reported as `unmatched` and the split — the whole point of that
+section — is lost.
 
 SLURM launchers for each are in `bench/`. They assume 20 cores and write to
 `bench/out/`, which is gitignored.

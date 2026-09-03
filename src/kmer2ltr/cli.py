@@ -9,6 +9,7 @@ from pathlib import Path
 
 from . import align, cluster
 from .extras import PERFECT_MODES, ExtraSpec, ExtraWriter, stream_paths
+from .genome import Options
 from .runner import run, scan_output
 
 _SWEEP = f"{cluster.SWEEP[0]:.2f}-{cluster.SWEEP[-1]:.2f}"
@@ -30,6 +31,12 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--resume", action="store_true",
                    help="skip records already present in the output and append")
     p.add_argument("-v", "--verbose", action="store_true", help="per-step progress")
+    p.add_argument("--genome", nargs="+", metavar="FASTA", default=None,
+                   help="reference genome(s) the input was extracted from, plain "
+                        "or gzipped. Fills the orientation and TSD columns for "
+                        "records whose header carries a chrom:start-end locus, "
+                        "and lets --trim-flanks correct the header of a record "
+                        "stored reverse-complemented")
 
     ex = p.add_argument_group("extra outputs (all require -o, none by default)")
     ex.add_argument("--trim-flanks", action="store_true",
@@ -70,6 +77,14 @@ def _parser() -> argparse.ArgumentParser:
                      help="minimum alignment bit score to report a pair")
     adv.add_argument("--max-window", type=int, default=None,
                      help="cap on the prefix/suffix search window in bp")
+    adv.add_argument("--tsd-anchor", type=float, default=0.0, metavar="BITS",
+                     help="treat a target-site duplication at a record's own "
+                          "termini as this many bits of evidence against calling "
+                          "a flank there. Needs --genome. The default of 0 leaves "
+                          "every boundary exactly where it would be without a "
+                          "reference, which is what keeps the TSD an independent "
+                          "check on the answer rather than an input to it "
+                          "(default: %(default)s)")
     return p
 
 
@@ -89,6 +104,17 @@ def _validate(args, spec: ExtraSpec) -> str | None:
         return f"--threads must be >= 1, got {args.threads}"
     if args.mutation_rate is not None and not args.mutation_rate > 0:
         return f"-u/--mutation-rate must be > 0, got {args.mutation_rate}"
+    for g in args.genome or ():
+        if not Path(g).exists():
+            return f"--genome file not found: {g}"
+        if Path(g).is_dir():
+            return f"--genome is a directory, not a FASTA: {g}"
+    if args.tsd_anchor:
+        if args.tsd_anchor < 0:
+            return f"--tsd-anchor must be >= 0, got {args.tsd_anchor}"
+        if not args.genome:
+            return "--tsd-anchor needs --genome: the duplication it scores lies "\
+                   "outside the record"
 
     wants_extra = bool(spec) or args.plot
     if wants_extra and args.output == "-":
@@ -103,13 +129,17 @@ def _validate(args, spec: ExtraSpec) -> str | None:
         # run is about to parse -- and the emptied stream is then deleted as
         # "received no records". Feeding a --trim-flanks output back in is the
         # obvious way to land here, so it is checked, not documented.
-        src = inp.resolve()
+        # Every reference is checked alongside the input for the same reason:
+        # these paths are opened for writing before anything is read.
+        reads = {inp.resolve(): args.input}
+        for g in args.genome or ():
+            reads[Path(g).resolve()] = g
         for label, path in (("-o/--output", Path(args.output)),
                             *((f"the {k} output", v)
                               for k, v in stream_paths(base, spec).items())):
-            if path.exists() and path.resolve() == src:
-                return (f"{label} would be written to the input file "
-                        f"({args.input}); it would be destroyed")
+            if path.exists() and path.resolve() in reads:
+                return (f"{label} would be written to an input file "
+                        f"({reads[path.resolve()]}); it would be destroyed")
     if wants_extra and args.resume:
         # The TSV resumes on its data-line count; the auxiliary FASTAs hold only
         # the passing subset, so that count cannot tell us where they stopped.
@@ -173,6 +203,7 @@ def main(argv: list[str] | None = None) -> int:
     # be a silent no-op: both are already bound as default arguments at def time.
     classify_kw = {"flank_sensitivity": args.flank_sensitivity,
                    "mutation_rate": args.mutation_rate}
+    gkw = {"genome": args.genome, "gopt": Options(anchor=args.tsd_anchor)}
     if args.flank_bits is not None:
         classify_kw["t_bits"] = args.flank_bits
     if args.max_window is not None:
@@ -206,7 +237,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.output == "-":
             n = run(inp, sys.stdout, args.threads, args.cs, skip, args.verbose,
-                    resuming=args.resume, spec=None, writer=None, **classify_kw)
+                    resuming=args.resume, spec=None, writer=None,
+                    **gkw, **classify_kw)
         else:
             # append whenever resuming -- even at skip == 0, where the header was already
             # flushed but no record finished. The header is suppressed on the strength of
@@ -218,7 +250,7 @@ def main(argv: list[str] | None = None) -> int:
             with open(args.output, mode) as fh:
                 n = run(inp, fh, args.threads, args.cs, skip, args.verbose,
                         resuming=has_header, spec=spec or None, writer=writer,
-                        **classify_kw)
+                        **gkw, **classify_kw)
     finally:
         if writer is not None:
             writer.close()

@@ -99,7 +99,7 @@ def _locate_locus(seq_id: str):
     return None
 
 
-def shift_locus(seq_id: str, trim5: int, trim3: int) -> str:
+def shift_locus(seq_id: str, trim5: int, trim3: int, orientation: str = "+") -> str:
     """Move a `chrom:start-end` header inwards by the trimmed flank lengths.
 
     Everything around the locus -- a RepeatMasker-style class tag, a
@@ -107,12 +107,25 @@ def shift_locus(seq_id: str, trim5: int, trim3: int) -> str:
     no parseable locus are returned unchanged: this is the one place in Kmer2LTR
     that reads a header as anything but an opaque id, and it declines rather
     than guesses.
+
+    `orientation` is which strand the record is stored on relative to those
+    coordinates. Annotation pipelines routinely reverse-complement an element
+    while leaving forward coordinates in its header, and such a record has its
+    5' terminus at `end`, so the 5' trim comes off `end` and the 3' trim off
+    `start`. Getting it backwards translates the interval by `trim5 - trim3`
+    while leaving its length correct -- an error a length check cannot see.
+
+    Nothing in a sequence reveals its own storage orientation, so the default is
+    `"+"`: without `--genome` this behaves exactly as it always has, and a
+    forward-stored input is unaffected either way.
     """
     found = _locate_locus(seq_id)
     if found is None:
         return seq_id
     m, lo, hi = found
     chrom, start, dash, end = m.group(1), int(m.group(2)), m.group(3), int(m.group(4))
+    if orientation == "-":
+        trim5, trim3 = trim3, trim5
     start += trim5
     end -= trim3
     if start > end:
@@ -192,7 +205,8 @@ def build(result, aln, raw: str, spec: ExtraSpec) -> Extras | None:
         internal=(fasta_record(result.seq_id, internal)
                   if (spec.internal and internal) else None),
         trimmed=(fasta_record(
-            shift_locus(result.seq_id, result.flank5_len, result.flank3_len),
+            shift_locus(result.seq_id, result.flank5_len, result.flank3_len,
+                        result.orientation or "+"),
             raw[l5s - 1:l3e]) if spec.trimmed else None),
         perfect=perfect,
     )

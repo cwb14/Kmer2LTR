@@ -27,9 +27,15 @@ reverse-complement). Everything else is estimated from the element itself.
 That matters in practice: because the tool never looks for `TG`…`CA` termini or
 target-site duplications, those signals stay available as *independent* checks on
 its output. They are used that way in `docs/benchmarks.md` and nowhere in the
-code. The `motif` column reports whichever two dinucleotides the boundary landed
-on — it is read off the answer, never used to find it, which is exactly what
-makes it worth reading.
+code. The `motif` and `tsd` columns report whichever dinucleotides and whichever
+duplication the boundary landed on — read off the answer, never used to find it,
+which is exactly what makes them worth reading.
+
+One flag can change that, and only if you ask for it. `--tsd-anchor` lets a
+target-site duplication argue against calling a flank; turning it on spends the
+TSD's independence to buy a boundary correction. It is off by default, and
+`docs/benchmarks.md` shows why the evidence does not currently support turning it
+on.
 
 ## What it is for
 
@@ -62,7 +68,7 @@ clustering flags. Both are in `environment.yml`.
 ## Usage
 
 ```
-Kmer2LTR [-o OUT] [-u RATE] [--cs] [-t THREADS] [--resume] [-v] input.fa[.gz]
+Kmer2LTR [-o OUT] [-u RATE] [--cs] [-t THREADS] [--genome REF] [--resume] [-v] input.fa[.gz]
 ```
 
 | flag | meaning |
@@ -70,6 +76,7 @@ Kmer2LTR [-o OUT] [-u RATE] [--cs] [-t THREADS] [--resume] [-v] input.fa[.gz]
 | `-o, --output` | output TSV (default: stdout) |
 | `-u, --mutation-rate` | neutral substitution rate per site per year; fills the `k2p_time` column |
 | `-t, --threads` | worker processes (default: 1) |
+| `--genome` | reference the input was cut from; fills the orientation and TSD columns |
 | `--cs` | emit a minimap2-style `cs` string instead of an extended CIGAR |
 | `--resume` | skip records already in the output file and append |
 | `-v, --verbose` | per-step progress |
@@ -120,6 +127,11 @@ shifted inwards to match. Both common placements are recognised —
 `TE_1#LTR/Copia::chr1:1000-2000` — and `..` is accepted for `-`. Headers it
 cannot parse exactly are left alone.
 
+**Give it `--genome` if your input might be stored reverse-complemented.** A
+reversed record's 5' terminus sits at the header's `end`, so the two trims have
+to be applied to the opposite coordinates; nothing in the sequence says which
+case you are in. Without a reference, forward storage is assumed.
+
 Every sequence these outputs cut from your input is reproduced **character for
 character**: soft-masking and ambiguity codes survive, even though the alignment
 itself ran on an uppercased ACGT/N copy. Only the IUPAC consensus is
@@ -153,10 +165,71 @@ second estimate.
 data-line count, but these files hold only the passing subset, so that count
 cannot say where they stopped.
 
+`--resume` also cannot tell that you have changed a flag since the run it is
+continuing. Resuming a `--genome` run onto a table written without one appends
+populated columns after `NA` ones, and the file gives no sign of it — the same
+hazard `-u` has always had, now four columns wider. Resume the command you ran,
+not a different one.
+
 One caveat on duplicate record IDs. The TSV is positional, so duplicates there
 are harmless — but these files are keyed by ID, and a cluster table naming a
 duplicated ID cannot be joined back to one element. `Kmer2LTR` warns once on
 stderr if that happens.
+
+### Genomic context
+
+```bash
+Kmer2LTR elements.fa.gz --genome ref.fa.gz -o elements.tsv -t 20
+```
+
+Three things a record cannot tell you about itself, and one reference can.
+
+**Which strand it is stored on.** Annotation pipelines routinely
+reverse-complement an element while leaving forward genomic coordinates in its
+header, and no amount of staring at the sequence reveals that — a direct
+terminal repeat stays one under reverse-complement, which is the same property
+that lets `Kmer2LTR` ignore strand everywhere else. It matters in exactly one
+place: `--trim-flanks` shifts those coordinates inwards, and on a reversed
+record the 5' trim belongs to the header's `end`. Applying it the forward way
+translates the interval by `flank5_len - flank3_len` while leaving its *length*
+correct, so a length check does not catch it. On a three-genome *Arabidopsis*
+call set 30.7% of records are stored reversed and 7.9% of `--trim-flanks`
+headers were wrong by a mean of 26 bp; on a human set, 9.9% and 2.6%. Without
+`--genome` forward storage is assumed, which is what every earlier version did.
+
+**Target-site duplications.** A TSD lies *outside* the element, so without the
+reference it can only be looked for when a flank was called — precisely the
+records whose boundaries are least certain. With one it is available at every
+boundary, and it is the sharpest signal in the table: at the boundaries
+`Kmer2LTR` calls perfectly bounded it is present 22–40× more often than at a
+control position ten bases away. The range is not noise — it is which detector
+called the element, and `docs/benchmarks.md` is largely about why that matters.
+
+**Whether the input was already perfectly bounded**, which is what `tsd_input`
+reports and what `--tsd-anchor` can act on.
+
+Headers are matched as `chr1:1000-2000#LTR/Gypsy` or `bedtools getfasta -name`'s
+`TE_1#LTR/Copia::chr1:1000-2000`; `..` is accepted for `-`. A record whose
+header carries no locus, or names a contig the reference lacks, gets `NA` in all
+four columns and is otherwise untouched. Several references may be given —
+`--genome a.fa b.fa` — so a multi-species call set needs no concatenation.
+
+Each terminus is anchored **independently**, the 5' end from `start` and the 3'
+from `end`. That is not fussiness: annotation sets routinely contain records
+shorter than their header span, because a nested inner element was excised while
+the header kept the outer interval (14.6% of the *Arabidopsis* set, 29.1% of the
+human one). The middles do not correspond; both termini still do. An end that
+fails to anchor reports `NA` rather than a value read from the wrong place.
+
+The reference is read **once, streaming**, in bounded blocks rather than by
+line, so a contig is never held whole even when the reference is written
+unwrapped: GRCh38.p14 passes in 27 s at a 38 MB peak, and a 50 Mbp single-line
+contig costs nothing measurable. No index, no `bgzip`, no extra dependency;
+plain gzip is fine, and both coordinate conventions are accepted, so a
+`bedtools getfasta` header works as well as a 1-based one. What memory the run
+does use is the harvest, which scales with your record count and not with the
+reference — about 700 bytes each. Measured cost of the extra pass:
+*Arabidopsis* 26 s → 31 s, GRCh38.p14 18 s → 45 s.
 
 ### Advanced flags
 
@@ -169,6 +242,7 @@ hand, so you should rarely need these.
 | `--flank-sensitivity` | `strict` (default), `balanced`, `sensitive` — see below |
 | `--min-bitscore` | additional floor on the reported alignment score |
 | `--max-window` | cap the prefix/suffix search window |
+| `--tsd-anchor` | bits of credit a TSD at a record's own termini gets against calling a flank there. Needs `--genome`; `0` (off) by default |
 
 **`--flank-sensitivity` is the one knob that encodes something about your data
 rather than about the sequence.** A flank of length *k* can only ever supply
@@ -196,15 +270,16 @@ boundary stops absorbing flank bases into the reported LTR.
 
 ```
 1  seq_id        7  ltr3_end     13 n_sites     19 k2p                25 k2p_time
-2  seq_len       8  ltr5_len     14 n_ts        20 k2p_se
-3  status        9  ltr3_len     15 n_tv        21 bitscore
-4  ltr5_start   10  flank5_len   16 n_gapcols   22 flank_margin_bits
-5  ltr5_end     11  flank3_len   17 identity    23 cigar
+2  seq_len       8  ltr5_len     14 n_ts        20 k2p_se             26 orientation
+3  status        9  ltr3_len     15 n_tv        21 bitscore           27 tsd
+4  ltr5_start   10  flank5_len   16 n_gapcols   22 flank_margin_bits  28 tsd_offset
+5  ltr5_end     11  flank3_len   17 identity    23 cigar              29 tsd_input
 6  ltr3_start   12  aln_len      18 p_dist      24 motif
 ```
 
-`motif` and `k2p_time` sit *after* `cigar` rather than before it, so every
-column that predates them keeps its number and no existing `cut -f` shifts.
+Everything after `cigar` was *appended* rather than inserted, so every column
+that predates it keeps its number and no existing `cut -f` shifts. Columns 26–29
+need `--genome` and are `NA` without it.
 
 Coordinates are **1-based inclusive**, relative to the sequence as you supplied
 it, so `seq[ltr5_start-1:ltr5_end]` is the 5' LTR.
@@ -223,6 +298,28 @@ restatement of them.
 `k2p_time` is `round(k2p / (2 × µ))` in years, and `NA` without `-u`. The
 divergence spans two branches, one per LTR copy, which is where the factor of
 two comes from.
+
+`orientation` is `+` or `-`: whether the record is stored as the reference holds
+it or reverse-complemented, relative to its own header coordinates. `-` is not a
+statement about the element's biology — an LTR-RT has no preferred strand — only
+about how the file you were given was written.
+
+`tsd` is the target-site duplication at the boundary `Kmer2LTR` called,
+uppercase, or `.` if there is none. It is the companion to `motif` and is read
+the same way: off the answer, never used to find it. `tsd_input` is the same
+measurement at the record's termini *as you supplied them*, so it describes the
+annotator rather than the tool. The two are the same measurement whenever no
+flank was called, and they separate exactly where the two disagree — which is
+the interesting population, and the one `docs/benchmarks.md` splits by detector.
+
+`tsd_offset` is how far each boundary had to move for `tsd` to appear, as
+`d5,d3`; positive means *into* the element. `0,0` is a duplication sitting
+exactly on the called boundary, `0,1` one whose 3' boundary is a base too far
+out. It is `NA` when `tsd` is `.`.
+
+A duplication is accepted only if the two k-mers match exactly, contain no `N`,
+and hold at least two distinct bases — a homopolymer run matches its own
+reflection almost anywhere in a genome and would swamp the signal.
 
 ### `status`
 
@@ -303,9 +400,9 @@ signals the tool never uses are then checked as independent confirmation.
 pytest
 ```
 
-310 tests on small synthetic fixtures — no real data required. The handful
-that shell out to `mmseqs` or import `matplotlib` skip themselves when those are
-absent.
+395 tests on small synthetic fixtures — no real data required, including a
+miniature reference genome for `--genome`. The handful that shell out to
+`mmseqs` or import `matplotlib` skip themselves when those are absent.
 
 ## Citation
 
