@@ -1,10 +1,9 @@
 # Kmer2LTR
 
-Find the two LTRs in an LTR retrotransposon and report how far they have
+Find the two LTRs in an LTR retrotransposon (LTR-RTs) and report how far they have
 diverged.
 
-Give it a FASTA of putative intact elements; it gives you back a TSV with one
-row per input record: where each LTR starts and ends, the Kimura 2-parameter
+Provide a fasta of putative intact elements and it classifies where each LTR starts and ends, the Kimura 2-parameter (K2P)
 distance between them, and the alignment that produced it.
 
 ```bash
@@ -13,22 +12,18 @@ Kmer2LTR elements.fa.gz -o elements.tsv -t 20
 
 > This is a rewrite, and the current version. The original k-mer/MAFFT
 > implementation is preserved unchanged on the
-> [`legacy`](https://github.com/cwb14/Kmer2LTR/tree/legacy) branch, which is
-> still the one to use if you need a domains file (`-D`), JC69 distances, or
-> the pooled `*.summary` output. Both carry the same command name.
+> [`legacy`](https://github.com/cwb14/Kmer2LTR/tree/legacy) branch.
 
 ## What it assumes
 
-One thing only: **the 5' and 3' ends of each input sequence are homologous to
-each other.** No LTR length parameter, no terminal-motif requirement, no family
-model, no strand handling (a direct terminal repeat stays one under
-reverse-complement). Everything else is estimated from the element itself.
+**the 5' and 3' ends of each input sequence are homologous to
+each other.** 
 
-That matters in practice: because the tool never looks for `TG`…`CA` termini or
-target-site duplications, those signals stay available as *independent* checks on
+That matters in practice because the tool never looks for `TG…CA` termini or
+target-site duplications (TSD), those signals stay available as *independent* checks on
 its output. They are used that way in `docs/benchmarks.md` and nowhere in the
 code. The `motif` and `tsd` columns report whichever dinucleotides and whichever
-duplication the boundary landed on — read off the answer, never used to find it,
+duplication the boundary landed on, never used to find it,
 which is exactly what makes them worth reading.
 
 One flag can change that, and only if you ask for it. `--tsd-anchor` lets a
@@ -37,11 +32,14 @@ TSD's independence to buy a boundary correction. It is off by default, and
 `docs/benchmarks.md` shows why the evidence does not currently support turning it
 on.
 
+Note: your input LTR-RTs may have been detected using pipelines that are tuned for boundary classification using `TG…CA` termini and/or TSDs. 
+LTRharvest and LTR_finder both have parameters for this, and the latter tool uses `TG…CA`, which cannot be turned off. 
+
 ## What it is for
 
 Two things, and the second comes free with the first.
 
-1. **Dating insertions.** An LTR retrotransposon inserts with two identical
+1. **Dating insertions.** An LTR-RT inserts with two identical
    LTRs, which then diverge as neutral sequence. Their divergence is a molecular
    clock for the insertion, and K2P is the standard correction for multiple hits
    at the same site.
@@ -55,15 +53,13 @@ Two things, and the second comes free with the first.
 ## Install
 
 ```bash
+git clone ....
+cd Kmer2LTR
 mamba env create -f environment.yml
 mamba activate kmer2ltr
 pip install -e .
+cd ..
 ```
-
-Dependencies: `parasail` (SIMD Smith-Waterman), `pywfa` (wavefront alignment),
-`numpy`. Python 3.10+. Two more are needed only by the extra outputs, and only
-when you ask for them: `matplotlib` for `--plot`, and `mmseqs2` for the
-clustering flags. Both are in `environment.yml`.
 
 ## Usage
 
