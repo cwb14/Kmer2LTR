@@ -238,7 +238,7 @@ hand, so you should rarely need these.
 | `--flank-sensitivity` | `strict` (default), `balanced`, `sensitive` — see below |
 | `--min-bitscore` | additional floor on the reported alignment score |
 | `--max-window` | cap the prefix/suffix search window |
-| `--tsd-anchor` | bits of credit a TSD at a record's own termini gets against calling a flank there. Needs `--genome`; `0` (off) by default |
+| `--tsd-anchor` | bits of credit a TSD at a record's own termini gets against calling a flank there. Needs `--genome`; `0` (off) by default. If you want to use, try setting 4-8 to be conservative |
 
 **`--flank-sensitivity` is the one knob that encodes something about your data
 rather than about the sequence.** A flank of length *k* can only ever supply
