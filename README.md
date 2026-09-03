@@ -53,7 +53,7 @@ Two things, and the second comes free with the first.
 ## Install
 
 ```bash
-git clone ....
+git clone https://github.com/cwb14/Kmer2LTR.git
 cd Kmer2LTR
 mamba env create -f environment.yml
 mamba activate kmer2ltr
