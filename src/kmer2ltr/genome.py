@@ -34,6 +34,7 @@ import sys
 from dataclasses import dataclass, replace
 
 from .extras import _locate_locus
+from .fasta import is_gzip
 
 PAD = 32          # reference bases kept outside each end of the record
 PROBE = 40        # bases compared against the record to settle its orientation
@@ -93,7 +94,9 @@ def _chunks(path, size: int = BLOCK):
     out of it is the most expensive thing this module could do, so the extracted
     windows are decoded and nothing else is.
     """
-    op = gzip.open if str(path).endswith(".gz") else open
+    # By content, not by name: the reference this is handed is routinely a
+    # gzipped original renamed `.fa` by the pipeline that staged it.
+    op = gzip.open if is_gzip(path) else open
     with op(path, "rb") as fh:
         buf = b""
         while True:
