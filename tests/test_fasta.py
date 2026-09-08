@@ -29,6 +29,22 @@ def test_read_fasta_gzip(tmp_path):
         fh.write(">x\nacgtACGT\n")
     assert list(read_fasta(p)) == [("x", "ACGTACGT")]
 
+def test_read_fasta_gzip_not_named_gz(tmp_path):
+    """Compression is sniffed, not inferred from the suffix: a caller that
+    renames a `.fa.gz` to `.fa` -- LTRquest stages every genome that way -- must
+    still be read as gzip rather than decoded as text and thrown at sanitize."""
+    p = tmp_path / "c.fa"
+    with gzip.open(p, "wt") as fh:
+        fh.write(">x\nacgtACGT\n")
+    assert list(read_fasta(p)) == [("x", "ACGTACGT")]
+
+def test_read_fasta_plain_named_gz(tmp_path):
+    """And the mislabel the other way round, which the suffix test failed on
+    with BadGzipFile."""
+    p = tmp_path / "c2.fa.gz"
+    p.write_text(">x\nacgtACGT\n")
+    assert list(read_fasta(p)) == [("x", "ACGTACGT")]
+
 def test_read_fasta_blank_lines_and_empty_file(tmp_path):
     p = tmp_path / "d.fa"
     p.write_text(">x\n\nACGT\n\n\n>y\nGG\n")
