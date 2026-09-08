@@ -106,6 +106,24 @@ def test_harvest_reads_a_gzipped_reference(tmp_path):
     assert w == Window(seq[16:20], seq[20:24], seq[56:60], seq[60:64])
 
 
+def test_harvest_reads_a_gzipped_reference_whatever_it_is_named(tmp_path):
+    """A reference is opened on what it holds, not on what it is called.
+
+    Pipelines rename: LTRquest stages every genome as `<prefix>.input_genome.fa`
+    whether the file behind it is a plain FASTA or the caller's original
+    `.fa.gz`. Read as text, a compressed stream yields no contig the loci match
+    -- silently, until some DEFLATE byte happens to be `>` and the header split
+    raises UnicodeDecodeError instead.
+    """
+    import gzip
+    seq = _rnd(100, 3)
+    p = tmp_path / "g.fa"                     # gzip content, plain-FASTA name
+    with gzip.open(p, "wt") as fh:
+        fh.write(">c1\n" + seq + "\n")
+    w = harvest([p], [("c1", 21, 60)], pad=4, probe=4)[("c1", 21, 60)]
+    assert w == Window(seq[16:20], seq[20:24], seq[56:60], seq[60:64])
+
+
 def test_harvest_head_and_tail_may_overlap_on_a_short_element(tmp_path):
     """`head` and `tail` are separate cuts, so an element shorter than 2*probe
     simply has them overlap rather than the second being truncated."""
