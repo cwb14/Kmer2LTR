@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import gzip
-from pathlib import Path
 from typing import Iterator
 
 class _Table(dict):
@@ -26,14 +25,30 @@ def sanitize(seq: str) -> str:
     return seq.translate(_TABLE)
 
 
+def is_gzip(path) -> bool:
+    """True when `path` holds gzip (or bgzip) data, whatever it is named.
+
+    Sniffed rather than read off the suffix because callers rename: LTRquest
+    stages every genome as `<prefix>.input_genome.fa` whether the file behind it
+    is a plain FASTA or the caller's original `.fa.gz`. Handing a compressed
+    stream to a text reader does not fail where the mistake was made -- it
+    sanitises binary to N, or raises UnicodeDecodeError several steps later on
+    whichever DEFLATE byte happened to look like a header.
+
+    A file that cannot be opened is not gzip; the caller's own open raises the
+    error, which says more than one from a two-byte probe would.
+    """
+    try:
+        with open(path, "rb") as fh:
+            return fh.read(2) == b"\x1f\x8b"
+    except OSError:
+        return False
+
+
 def _open(path) -> Iterator[str]:
-    path = Path(path)
-    if path.suffix == ".gz":
-        with gzip.open(path, "rt") as fh:
-            yield from fh
-    else:
-        with open(path, "rt") as fh:
-            yield from fh
+    op = gzip.open if is_gzip(path) else open
+    with op(path, "rt") as fh:
+        yield from fh
 
 
 def _despace(seq: str) -> str:
