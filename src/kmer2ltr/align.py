@@ -81,7 +81,8 @@ class Hit:
 
 def discover(S: str, matrix, gap_open: int | Gaps = SIG_GAP_OPEN,
              gap_extend: int = SIG_GAP_EXTEND, w0: int = W0, edge: int = EDGE,
-             max_evalue: float = MAX_EVALUE) -> Hit | None:
+             max_evalue: float = MAX_EVALUE,
+             rule: str = "best-score") -> Hit | None:
     """Locate the terminal repeat pair by adaptive-window local alignment.
 
     Score-only passes throughout: traceback costs ~7x more and is not needed
@@ -90,7 +91,15 @@ def discover(S: str, matrix, gap_open: int | Gaps = SIG_GAP_OPEN,
 
     `gap_open` accepts a `Gaps` for callers that carry one; the two-int form is
     kept because the plan, the tests and `bench/` all call it that way.
+
+    `rule` selects which located pair wins once the window has settled. See
+    `PERIOD_RULES`: "best-score" keeps the highest-scoring alignment, which is
+    what every published measurement was made under; "outermost" hands the
+    settled windows to `_outermost_period`.
     """
+    if rule not in PERIOD_RULES:
+        raise ValueError(f"unknown period rule {rule!r}; "
+                         f"choices: {sorted(PERIOD_RULES)}")
     if isinstance(gap_open, Gaps):
         gap_open, gap_extend = gap_open.open, gap_open.extend
     L = len(S)
@@ -125,7 +134,10 @@ def discover(S: str, matrix, gap_open: int | Gaps = SIG_GAP_OPEN,
             # Returning it anyway would hand callers noise indistinguishable from a real
             # pair, since Hit carries no significance field.
             return None
-        return Hit(score=fwd.score, qb=qb, qe=qe, rb=rb, re=re_, w=w)
+        hit = Hit(score=fwd.score, qb=qb, qe=qe, rb=rb, re=re_, w=w)
+        if rule == "outermost":
+            hit = _outermost_period(P, Q, hit, L - w, max_evalue)
+        return hit
 
 
 from .k2p import (count_gap_runs, count_substitutions, insertion_time,
@@ -136,6 +148,154 @@ from .cigar import aligned_pair_from_cigartuples, cs_string, extended_cigar
 from pywfa import WavefrontAligner
 
 MIN_CALIB_SITES = 50
+
+
+# --------------------------------------------------------------------------- #
+# Stage 1b -- period selection
+# --------------------------------------------------------------------------- #
+
+# "best-score" is Stage 1 exactly as every measurement in docs/benchmarks.md was
+# made: the single highest-scoring local alignment of the two windows wins.
+# "outermost" re-reads those same windows as a set of candidate PERIODS and
+# prefers the pair reaching furthest towards both termini. That is what recovers
+# an element whose LTRs carry a tandem array: the aligner locks onto a register
+# shifted by a whole number of array units, and a shifted register always sits
+# further in than the true pair.
+PERIOD_RULES = ("best-score", "outermost")
+
+MIN_INTERNAL = 100   # a candidate must leave at least this between the two copies
+MAX_PERIODS = 6      # candidate offsets examined per settled window
+Z_MIN = 4.0          # excess-match z-score a diagonal must show to be a candidate
+DIAG_SEP = 32        # offsets closer than this are one register, not two
+_ACGT = np.frombuffer(b"ACGT", np.uint8)
+
+
+def _diagonal_matches(P: str, Q: str) -> tuple[np.ndarray, int]:
+    """Exact match count for every offset `d = j - i`, by FFT cross-correlation.
+
+    Returns `(counts, n)` with `counts[d % n]` the number of positions where
+    `P[i] == Q[i + d]`. Every position is counted, so this is not seeding and
+    carries no sensitivity cliff at high divergence -- which is the whole point:
+    the register this rule has to find is the DIVERGED one, the shifted register
+    having won precisely because it sits on better-conserved sequence.
+
+    O(w log w) rather than the O(w^2) of walking every diagonal.
+    """
+    w = len(P)
+    n = 1 << (2 * w - 1).bit_length()
+    pa = np.frombuffer(P.encode(), np.uint8)
+    qa = np.frombuffer(Q.encode(), np.uint8)
+    tot = np.zeros(n)
+    for b in _ACGT:
+        fp = np.fft.rfft((pa == b).astype(np.float64), n)
+        fq = np.fft.rfft((qa == b).astype(np.float64), n)
+        tot += np.fft.irfft(np.conj(fp) * fq, n)
+    # The counts are integers reconstructed through floating-point transforms;
+    # at these magnitudes the error is ~1e-10, so rounding recovers them exactly.
+    return np.rint(tot).astype(np.int64), n
+
+
+def _candidate_offsets(P: str, Q: str) -> list[int]:
+    """Offsets carrying a clear excess of matches, strongest first.
+
+    A diagonal of `l` comparable positions matches at a quarter of them by
+    chance with variance `3l/16`, so the excess is read as a z-score, and
+    diagonals too short to say anything are dropped. An offset within
+    `DIAG_SEP` of a stronger one is that register displaced by an indel rather
+    than a second candidate, so it is folded into it.
+    """
+    w = len(P)
+    if w < MIN_LEN:
+        return []            # no diagonal is long enough to say anything
+    counts, n = _diagonal_matches(P, Q)
+    ds = np.arange(-(w - 1), w)
+    ell = (w - np.abs(ds)).astype(np.float64)
+    keep = ell >= MIN_LEN
+    z = np.full(ds.shape, -np.inf)
+    z[keep] = ((counts[ds[keep] % n] - ell[keep] / 4.0)
+               / np.sqrt(ell[keep] * 3.0 / 16.0))
+    out: list[int] = []
+    for k in np.argsort(-z):
+        if z[k] < Z_MIN or len(out) >= MAX_PERIODS:
+            break
+        d = int(ds[k])
+        if all(abs(d - e) >= DIAG_SEP for e in out):
+            out.append(d)
+    return out
+
+
+def _diagonal_segment(P: str, Q: str, d: int) -> tuple[int, int, int] | None:
+    """Best ungapped segment on offset `d`, as `(i_begin, i_end, bits)`.
+
+    Scored +1/-1 per aligned position and 0 against an ambiguous base, which IS
+    the generic model -- `GENERIC_MATRIX` is exactly that -- so the returned
+    score is a bit score on the one scale every significance gate in this tool
+    is calibrated against, whatever matrix the caller happens to be aligning
+    with. Keeping candidate selection generic-scored is the same rule Stage 4
+    and Stage 2b already follow.
+
+    Ungapped on purpose. On 40 real elements the ungapped segment reproduces the
+    true pair's boundaries with a median error of 0 bp and a worst case of 3,
+    because a pair diverged enough to need indels is diverged along its whole
+    length rather than at one register-breaking point. Stage 3 settles the rest.
+    """
+    w = len(P)
+    i0, i1 = max(0, -d), min(w, w - d)
+    if i1 - i0 < MIN_LEN:
+        return None
+    pa = np.frombuffer(P.encode(), np.uint8)[i0:i1]
+    qa = np.frombuffer(Q.encode(), np.uint8)[i0 + d:i1 + d]
+    known = np.isin(pa, _ACGT) & np.isin(qa, _ACGT)
+    step = np.where(known, np.where(pa == qa, 1, -1), 0)
+    run = np.concatenate(([0], np.cumsum(step)))
+    gain = run - np.minimum.accumulate(run)
+    end = int(np.argmax(gain))
+    if gain[end] <= 0:
+        return None
+    begin = int(np.argmin(run[:end + 1]))
+    return i0 + begin, i0 + end - 1, int(gain[end])
+
+
+def _outermost_period(P: str, Q: str, hit: Hit, wstart: int,
+                      max_evalue: float = MAX_EVALUE) -> Hit:
+    """Swap `hit` for the outermost candidate period that qualifies.
+
+    A candidate is kept only if it is significant on its own under the generic
+    model, leaves at least `MIN_INTERNAL` between the two copies, and CONTAINS
+    the incumbent pair -- beginning no later and ending no earlier. Among those
+    the winner is the pair spanning furthest from the 5' copy's begin to the 3'
+    copy's end. The incumbent holds every tie and is the fallback when nothing
+    qualifies, so the pair this returns always covers the one it replaced.
+
+    Outerness is span, not period. A register shifted by one array unit has the
+    LARGER period about half the time, and the smaller span every time.
+    """
+    w = len(P)
+    if hit.qb == 0 and hit.re == w - 1:
+        return hit           # already reaches both termini; nothing can beat it
+    best, best_span = hit, hit.re - hit.qb
+    for d in _candidate_offsets(P, Q):
+        seg = _diagonal_segment(P, Q, d)
+        if seg is None:
+            continue
+        i_b, i_e, bitscore = seg
+        j_b, j_e = i_b + d, i_e + d
+        if j_e - i_b <= best_span:
+            continue
+        # Outermost on BOTH sides, not merely wider overall. A candidate that
+        # reached further 3' by giving up ground at the 5' end would still win on
+        # span, and there would then be no direction the flag can be trusted to
+        # move a boundary in. Measured on the fixture set and on a 600-record
+        # synthetic sweep this condition costs nothing: it changes no call.
+        if i_b > hit.qb or j_e < hit.re:
+            continue
+        if wstart + j_b - i_e - 1 < MIN_INTERNAL:
+            continue
+        if evalue(bitscore, w, w) > max_evalue:
+            continue
+        best, best_span = Hit(score=bitscore * SCALE, qb=i_b, qe=i_e,
+                              rb=j_b, re=j_e, w=w), j_e - i_b
+    return best
 
 
 def ltr_spans(S: str, hit: Hit) -> tuple[int, int, int, int]:
@@ -667,6 +827,10 @@ def classify(seq_id: str, S: str, **kw) -> Result:
     `mutation_rate` (substitutions per site per year) turns the divergence into
     a `k2p_time` in years; without it that column is `None`.
 
+    `period_rule` selects Stage 1's tie-break between located pairs: the
+    highest-scoring one, or the outermost one that still leaves a plausible
+    internal region. See `PERIOD_RULES` and `_outermost_period`.
+
     `tsd_credit` is external evidence, in bits, that the sequence's own termini
     are already the element's boundaries -- `--tsd-anchor` turns a genomic
     target-site duplication into it. It is a plain number here on purpose: this
@@ -688,7 +852,7 @@ def _classify(seq_id: str, S: str, *, cs: bool = False, t_bits: float | None = N
               snap_mode: str = "binary", inner: str = "none",
               comp: str = "element", gap_scheme: str = "adaptive",
               keep_weak: bool = True, stage4_recal: bool = True,
-              flank_sensitivity: str = "strict",
+              flank_sensitivity: str = "strict", period_rule: str = "best-score",
               mutation_rate: float | None = None,
               tsd_credit: float = 0.0) -> tuple[Result, tuple[str, str] | None]:
     """`classify` plus the final aligned LTR pair.
@@ -706,7 +870,7 @@ def _classify(seq_id: str, S: str, *, cs: bool = False, t_bits: float | None = N
     if all(ch == "N" for ch in S):
         return _empty(seq_id, L, "all_ambiguous"), None
 
-    hit = discover(S, GENERIC_MATRIX, SIG_GAPS, w0=w0)
+    hit = discover(S, GENERIC_MATRIX, SIG_GAPS, w0=w0, rule=period_rule)
     if hit is None:
         return _empty(seq_id, L, "no_pair"), None
 
@@ -727,7 +891,7 @@ def _classify(seq_id: str, S: str, *, cs: bool = False, t_bits: float | None = N
         # more than 10 bp and never returned None. It removes the repeated
         # doubling passes, which for a 6 kb-LTR element is three redundant
         # full-window Smith-Waterman alignments per record.
-        hit = discover(S, matrix, gaps, w0=hit.w) or hit
+        hit = discover(S, matrix, gaps, w0=hit.w, rule=period_rule) or hit
     tb = t_bits if t_bits is not None else t_bits_for(d_hat)
 
     spans = ltr_spans(S, hit)

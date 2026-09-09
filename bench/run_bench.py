@@ -286,6 +286,7 @@ ABLATIONS: dict[str, dict] = {
     "fixed_1_1": {"_matrix_spec": "fixed_1_1"},
     "no_stage3": {"use_stage3": False},
     "no_stage4": {"use_stage4": False},
+    "period_outermost": {"period_rule": "outermost"},
     "wfa_vs_matrix": {"refine": "matrix"},
     "trim_0": {"trim": 0},
     "trim_3": {"trim": 3},

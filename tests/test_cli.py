@@ -550,3 +550,43 @@ def test_resume_reproduces_an_uninterrupted_run_with_a_genome(tmp_path):
     part.write_text("\n".join(lines[:3]) + "\n")          # header + 2 records
     assert main([str(fa), "-o", str(part), "--genome", str(g), "--resume"]) == 0
     assert part.read_text() == whole.read_text()
+
+
+def _shifted_register_fa(tmp_path):
+    """One record whose longest self-alignment is not its LTR pair.
+
+    Same construction as `tests/test_align_period.py`: a duplication that
+    overlaps both LTRs, so neither Stage 3 nor Stage 4 recovers them.
+    """
+    C, M, E = _rnd(100, 201), _rnd(500, 202), _rnd(200, 203)
+    D = C + M + C
+    seq = M[400:500] + D + E + D + M[0:100]
+    p = tmp_path / "period.fa"
+    p.write_text(f">e\n{seq}\n")
+    return p
+
+
+def test_period_rule_flag_actually_reaches_classify(tmp_path):
+    inp = _shifted_register_fa(tmp_path)
+    best, outer = tmp_path / "best.tsv", tmp_path / "outer.tsv"
+    assert main([str(inp), "-o", str(best)]) == 0
+    assert main([str(inp), "-o", str(outer), "--period-rule", "outermost"]) == 0
+    cols = lambda p: p.read_text().rstrip("\n").split("\n")[1].split("\t")[3:7]
+    assert cols(best) == ["101", "800", "1001", "1700"]
+    assert cols(outer) == ["1", "300", "1501", "1800"]
+
+
+def test_period_rule_defaults_to_the_measured_rule(tmp_path):
+    inp = _shifted_register_fa(tmp_path)
+    a, b = tmp_path / "a.tsv", tmp_path / "b.tsv"
+    main([str(inp), "-o", str(a)])
+    main([str(inp), "-o", str(b), "--period-rule", "best-score"])
+    assert a.read_text() == b.read_text()
+
+
+def test_an_unknown_period_rule_is_refused(tmp_path, capsys):
+    inp = _fa(tmp_path, n=1)
+    with pytest.raises(SystemExit) as e:
+        main([str(inp), "-o", str(tmp_path / "o.tsv"), "--period-rule", "widest"])
+    assert e.value.code == 2
+    assert "invalid choice" in capsys.readouterr().err

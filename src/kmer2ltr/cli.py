@@ -73,6 +73,18 @@ def _parser() -> argparse.ArgumentParser:
                           "threshold and suits tightly-extracted input; the looser "
                           "settings suit input padded with genomic context, at a "
                           "real cost in false flanks (default: %(default)s)")
+    adv.add_argument("--period-rule", choices=list(align.PERIOD_RULES),
+                     default="best-score",
+                     help="which located pair wins when a record offers more "
+                          "than one. 'best-score' takes the highest-scoring "
+                          "alignment of the two search windows, which is what "
+                          "every calibrated default here was measured under. "
+                          "'outermost' instead takes the pair reaching furthest "
+                          "towards both termini among those that stay "
+                          "significant and still leave an internal region -- use "
+                          "it when LTRs carrying a tandem array are being called "
+                          "too far in, since the aligner locks onto a register "
+                          "shifted by whole array units (default: %(default)s)")
     adv.add_argument("--min-bitscore", type=float, default=None,
                      help="minimum alignment bit score to report a pair")
     adv.add_argument("--max-window", type=int, default=None,
@@ -202,7 +214,8 @@ def main(argv: list[str] | None = None) -> int:
     # Thread tuning values explicitly. Assigning align.T_BITS / align.W0 would
     # be a silent no-op: both are already bound as default arguments at def time.
     classify_kw = {"flank_sensitivity": args.flank_sensitivity,
-                   "mutation_rate": args.mutation_rate}
+                   "mutation_rate": args.mutation_rate,
+                   "period_rule": args.period_rule}
     gkw = {"genome": args.genome, "gopt": Options(anchor=args.tsd_anchor)}
     if args.flank_bits is not None:
         classify_kw["t_bits"] = args.flank_bits

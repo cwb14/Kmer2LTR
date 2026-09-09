@@ -152,6 +152,115 @@ develops a sensitivity cliff precisely in the regime this tool exists to serve. 
 cost of exact DP is 0.27 ms for a 2 kb window at ~15 GCUPS, so there is no performance
 pressure to trade accuracy away.
 
+### Stage 1b — period selection (`--period-rule`, off by default)
+
+Stage 1 returns the highest-scoring alignment of the two windows. That is the LTR
+pair unless the record holds a *longer* repeat pair at some other period, in which
+case the aligner locks onto that register and the LTR pair is never seen. The case
+this arises in is an element whose LTRs sit inside a tandem array: the array
+admits many registers, and the one carrying the most alignable sequence is not
+the one that puts an LTR at each end of the record.
+
+Stage 4 does not recover it. Stage 4 searches `S[0:ltr5_start]` against
+`S[ltr3_end:L]`, which works when the wrong pair is nested strictly *inside* the
+right one. Here the wrong pair OVERLAPS both LTRs — its 5' copy begins inside the
+5' LTR and its 3' copy ends inside the 3' LTR — so the two leftover pieces are
+non-corresponding parts of the same LTR and are not homologous to each other.
+Measured on the fixture set below, Stage 4 recovers 0 of 20.
+
+`--period-rule outermost` re-reads the settled windows as a set of candidate
+**periods** and takes the outermost qualifying pair.
+
+**Enumeration is a diagonal profile, not seeding and not masking.** For every
+offset `d = j - i` the exact number of matching positions is obtained by FFT
+cross-correlation of the four base-indicator vectors, in `O(w log w)` rather than
+the `O(w^2)` of walking each diagonal. A diagonal of `l` comparable positions
+matches at `l/4` by chance with variance `3l/16`, so the excess is read as a
+z-score and offsets within `DIAG_SEP` of a stronger one are folded into it as the
+same register displaced by an indel.
+
+Two rejected alternatives, and why:
+
+- **k-mer offset histogram.** Cheaper, and it hands you seed positions. It also
+  reintroduces exactly the sensitivity cliff Stage 1 avoids by using full DP —
+  and it does so at the worst possible place, because the register this rule has
+  to find is the DIVERGED one. The shifted register won in the first place by
+  sitting on better-conserved sequence.
+- **Iterated masked Smith-Waterman.** Find a pair, overwrite both copies with `N`,
+  re-run. It is the standard trick and it does enumerate off-diagonal pairs, but
+  masking removes the sequence from *every* register, including the true one that
+  needs those same bases. The FFT profile suppresses a diagonal without touching
+  a base.
+
+**Each candidate is realised ungapped, and scored generically.** The best `+1/-1`
+segment along the offset is found by one linear scan. Ungapped is not a
+simplification for its own sake: measured against 40 real elements, the ungapped
+segment reproduces the true pair's boundaries with a median error of 0 bp and a
+worst case of 3, because a pair diverged enough to need indels is diverged along
+its whole length rather than at one register-breaking point. Stage 3 settles what
+is left. `+1/-1` per position with 0 against an ambiguous base *is*
+`GENERIC_MATRIX`, so the segment score is a bit score on the scale `MAX_EVALUE`
+was calibrated against — the same pinning Stage 2b and Stage 4 already use, and
+what keeps the rule's behaviour identical on both discovery passes.
+
+**Selection is by span, with three gates.** A candidate is kept only if it clears
+`MAX_EVALUE` on its own, leaves at least `MIN_INTERNAL` = 100 bp between the two
+copies, and CONTAINS the incumbent pair — beginning no later and ending no
+earlier. Among survivors the winner maximises `ltr3_end - ltr5_start`. The
+incumbent holds every tie and is the fallback when nothing qualifies.
+
+The containment gate is what makes the flag safe to reach for: without it a
+candidate could win on span by reaching further 3' while giving up ground at the
+5' end, and there would be no direction the flag could be trusted to move a
+boundary in. It is free — it changes no call on the fixture set or on a
+600-record synthetic sweep — because the displacement this rule corrects is a
+whole repeat unit at each end, not a base or two.
+
+Outerness is span and not period, which is the one place the obvious choice is
+wrong. A register shifted by one array unit has the LARGER period about half the
+time — measured over the fixture set the true period exceeded the called one in
+17 of 20 records and fell below it in 3 — and the smaller span in every one.
+
+The 100 bp internal floor is the tool's only length prior and it earns its place
+narrowly: at `W = floor(L/2)` a candidate can put its two copies flush against
+each other across the window boundary, which is a tandem duplication and not an
+LTR-RT. It is deliberately far below the shortest internal region a real element
+has (TRIMs run 100-300 bp), so it rejects the degenerate case and nothing else.
+
+**Measured.** 40 real elements from seven source accessions, 20 selected because
+their boundaries were wrong and 20 length-matched ones that were right, scored
+against curated `expect_ltr5` / `expect_ltr3` at +/- 10 bp
+(`bench/period_fixtures.py`):
+
+| set | n | `best-score` | `outermost` |
+|---|---|---|---|
+| known-bad | 20 | 0 | 20 |
+| controls | 20 | 15 | 20 |
+
+Nothing regressed. The five controls that move were mislabelled — they carry the
+same displacement, less obviously. The recorded baseline column shipped with that
+fixture set reproduced 0 of 40 against the code, so `bench/period_fixtures.py`
+ignores it and recomputes both rules.
+
+**Cost.** A pair already running from the first base to the last cannot be
+out-spanned, so the rule returns immediately and costs nothing; that is the
+common case for tightly-extracted input. Otherwise discovery costs 2-3x
+(0.36 ms -> 0.94 ms on a flanked 3.4 kb element; 0.46 ms -> 1.36 ms on a real
+2.3 kb one). End to end through `classify` the fixture set ran *faster* under the
+new rule, 173 ms -> 128 ms for 40 records, because the outer pair leaves Stage 3
+and Stage 4 less to do.
+
+**Known limit.** When the two LTRs differ in tandem copy number, the pair
+reaching furthest 5' and the pair reaching furthest 3' are different candidates
+at different periods, and no single-period rule recovers both ends at once. That
+case is unchanged.
+
+**The default stays `best-score`.** Every calibrated constant in this tool —
+`MAX_EVALUE`, the `T_BITS` schedule, `FLANK_SENSITIVITY` — was measured under it,
+and none of them has been re-derived under `outermost`. The rule ships as an
+ablation (`period_outermost` in both `bench/run_bench.py` and
+`bench/run_configs.py`) so that can be done before any default moves.
+
 ### Stage 2 — self-calibration
 
 Globally align the core pair and estimate identity `p̂`, transition/transversion ratio

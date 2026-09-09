@@ -236,6 +236,7 @@ hand, so you should rarely need these.
 |---|---|
 | `--flank-bits` | pin the evidence required to call a flank. The default is a schedule keyed on each element's own estimated divergence. |
 | `--flank-sensitivity` | `strict` (default), `balanced`, `sensitive` — see below |
+| `--period-rule` | `best-score` (default) or `outermost` — which pair wins when a record offers more than one; see below |
 | `--min-bitscore` | additional floor on the reported alignment score |
 | `--max-window` | cap the prefix/suffix search window |
 | `--tsd-anchor` | bits of credit a TSD at a record's own termini gets against calling a flank there. Needs `--genome`; `0` (off) by default. If you want to use, try setting 4-8 to be conservative |
@@ -261,6 +262,46 @@ which recovers short-flank detection at a real cost in false flanks:
 Use the looser settings when your input is padded with genomic context. Note the
 looser settings also reduce K2P bias — 37% lower at `balanced` — because the
 boundary stops absorbing flank bases into the reported LTR.
+
+**`--period-rule outermost` is for elements whose LTRs carry a tandem repeat.**
+By default the tool reports the highest-scoring alignment it can find between the
+start and the end of a record. That is the LTR pair almost always. It is not the
+LTR pair when the record contains an internal duplication that is *longer* than
+the LTRs. The aligner locks onto that register instead, and since the two
+registers differ by a whole number of repeat units, the pair it reports spans
+less of the record than the true pair does.
+
+You can recognise it in the output without knowing the right answer, as long as
+your input is tightly extracted. The called pair stops short of the ends of the
+record, so `flank5_len` or `flank3_len` comes back non-zero on an element that
+should have no flank at all. Across the 40 elements below, 25 of which the
+default rule gets wrong, that symptom caught 23 of the 25 and raised one false
+alarm among the 15 it gets right. Two weaker signs usually travel with it, an
+inflated `ltr5_len` and an internal region shorter than the family's.
+
+`outermost` reads the same two windows as a set of candidate periods and takes
+the pair reaching furthest towards both termini, among those that stay
+significant and still leave at least 100 bp between the two copies. A candidate
+only wins if it contains the pair the default would have picked, so switching the
+flag can only widen a located pair, never trade one side for the other. Where the
+first alignment already runs from the first base to the last, it returns
+immediately, which is the common case.
+
+On 40 real elements drawn from seven source accessions, 20 chosen because the
+boundaries were wrong and 20 length-matched ones that were right:
+
+| set | `best-score` correct | `outermost` correct |
+|---|---|---|
+| known-bad (n=20) | 0 | 20 |
+| controls (n=20) | 15 | 20 |
+
+The five controls that move were mislabelled: they carry the same displacement,
+just less obviously. Nothing regressed. Reproduce with
+`python bench/period_fixtures.py <fixture_dir>`.
+
+The default stays `best-score` because every calibrated constant in this tool —
+the flank threshold schedule, `MAX_EVALUE`, the divergence-aware `T_BITS` — was
+measured under it. Switch deliberately, per run.
 
 ## Output columns
 
