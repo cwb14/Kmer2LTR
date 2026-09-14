@@ -87,6 +87,17 @@ def test_diagonal_segment_locates_the_conserved_stretch():
     assert score >= 300                     # exact match, +1 bit per base
 
 
+def test_diagonal_segment_takes_no_break_even_bases_in_front():
+    """A match then a mismatch just ahead of the conserved stretch net zero, so
+    the maximal segment could begin at either end of them. It has to begin
+    where the stretch does: the selection rule reads extra bases as span, and
+    would move the 5' boundary out by exactly those two."""
+    motif = _rnd(300, 36)
+    P = "A" * 98 + "GT" + motif + "A" * 50
+    Q = "C" * 98 + "GA" + motif + "C" * 50
+    assert _diagonal_segment(P, Q, 0) == (100, 399, 300)
+
+
 def test_a_diagonal_shorter_than_the_minimum_is_not_a_candidate():
     P, Q = _rnd(400, 41), _rnd(400, 42)
     assert _diagonal_segment(P, Q, 400 - MIN_LEN + 1) is None

@@ -252,7 +252,8 @@ def _diagonal_segment(P: str, Q: str, d: int) -> tuple[int, int, int] | None:
     end = int(np.argmax(gain))
     if gain[end] <= 0:
         return None
-    begin = int(np.argmin(run[:end + 1]))
+    # the LAST tied minimum: break-even bases in front would otherwise read as span
+    begin = end - int(np.argmin(run[end::-1]))
     return i0 + begin, i0 + end - 1, int(gain[end])
 
 
