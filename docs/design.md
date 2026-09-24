@@ -381,7 +381,10 @@ section 6.6 (non-LTR TEs and shuffled sequence) to hit a target false-positive r
 dependence on window size, which a bare score threshold would get wrong for long
 elements — while the data supplies the constant.
 
-`bitscore` (output column 21) reports `S'`.
+`bitscore` (output column 21) reports `S'`. For a pair with a credit-decided end
+(`--tsd-anchor`, or a caller's `tsd_credit`) it is instead the local score of the
+paired parts, so bases the credit placed without a partner do not count against it
+(§ on the credit, below).
 
 ### Stage 3 — terminal boundary model selection
 
@@ -768,13 +771,47 @@ nearby TSD-like thing. And Stage 3's binary snap returns the whole candidate fla
 of it, so **the only outer boundary it can produce is the sequence terminus** -- it cannot
 put `ltr5_start` or `ltr3_end` anywhere else.
 
-That bound covers the outer boundaries and not the rest of the row. Accepting an extension
-also carries the opposite LTR's *inner* boundary outwards by the partner alignment's extent
-(`l3b -= k_in`, `l5e += k_in` in `snap_bounds`), so `ltr5_len`, `ltr3_len`, `identity` and
-`k2p` all move with it. Note also that one duplication is worth `--tsd-anchor` bits at each
-of the two ends independently, so the evidence spent on an element is twice the flag's
-value; both are reasons the flag is a knob to be measured rather than a default, and §6.10
-is why the measurement leaves it at zero.
+The credit is evidence about the outer boundary and moves nothing else. The opposite
+LTR's *inner* boundary moves only as far as the carried flank really pairs with it
+(`_homologous_reach`):
+
+- **Pairing.** The best local alignment of the flank against the partner side counts only
+  if it is significant (E ≤ `MAX_EVALUE`) and starts within `MAX_PARTNER_SKIP` = 200 bases
+  of the core on the partner side, so internal-region sequence that merely resembles the
+  flank cannot drag the boundary inward. On the flank side it may start any distance out:
+  the credit already vouches that every flank base belongs to the element (for example,
+  past an insertion next to the called LTR).
+- **Measurement.** Stage 5 aligns each end's paired stretch and the core separately
+  (`Bounds.pair5` / `pair3`) and lays everything else down as gap columns: the outermost
+  unpaired flank bases (a leading `I` run on the 5' LTR, a trailing `D` run on the 3' LTR)
+  and any stretch between the core and a paired stretch. `identity` and `k2p` count
+  paired sites only, and two unrelated blocks facing each other are never slid into
+  mismatches.
+- **Flanks homology alone would carry** keep that whole-flank alignment unless a
+  significant local pairing shows it is wrong (it stops short of the terminus, starts well
+  out from the core, or lies too deep in the partner side), or the flank is at least
+  `MIN_PAIRED_FLANK` = 100 bases long and shows no significant pairing at all. A pairing
+  within `PAIRING_END_SLACK` = 5 bases of every edge covers the whole flank. A credit
+  therefore never pairs such a flank worse than no credit would: a 50-80 bp homolog at
+  5-15% divergence can fail the significance test, and that says nothing about its partner.
+- **Significance.** A pair with a credit-decided end is judged on a local score of its
+  paired parts, so bases the credit placed without a partner do not count against it.
+
+Before this, a credited flank was force-aligned onto the internal region: the inner
+boundary moved by the whole flank and every unpaired base counted as a substitution. On
+real re-bounded LTR-RTs that inflated K2P by ~0.1 (median) and turned correct pairs into
+`weak_pair`.
+
+One duplication is worth `--tsd-anchor` bits at each of the two ends independently, so the
+evidence spent on an element is twice the flag's value. That is one reason the flag is a
+knob to be measured rather than a default; §6.10 is why the measurement leaves it at zero.
+
+Callers that already know the pair -- a record they widened or trimmed themselves -- can
+pass it: `classify(..., spans=(l5b, l5e, l3b, l3e))` (0-based, inclusive) skips discovery
+and Stage 4, snaps from those spans (so a credit still moves only their outer
+boundaries) and measures them, judging significance against their own LTR length. On an
+edited record, re-discovery can lock onto a different pair altogether. Spans that cannot
+be a pair in the record give status `bad_spans`.
 
 ## 4. Output columns
 
@@ -814,7 +851,9 @@ row; a test pins that.
 `min(|s5 + T|, |s3 + T|)` in bits: how decisively the boundary call was made. `T`
 is the threshold the decision was actually taken against, so under a non-zero
 `--tsd-anchor` it includes that credit — the column keeps describing the call
-that was made rather than the one that would have been. Large values
+that was made rather than the one that would have been. An end the credit carried
+(homology alone would have called a flank) contributes no margin: it was not a
+homology call. With both ends carried the column is `NA`. Large values
 mean the call was unambiguous; values near zero mark elements whose boundaries sit at the
 detection floor and which a cautious downstream analysis may wish to exclude.
 

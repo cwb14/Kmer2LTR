@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, fields
+from typing import NamedTuple
 
 import numpy as np
 import parasail
@@ -494,6 +495,21 @@ EXT_CAP = 2000       # max flank bases scored in one graded extension (memory bo
 EXT_REF_SLACK = 200  # ref allowance beyond 2x the query length
 
 
+class Pairing(NamedTuple):
+    """How a credited flank pairs with its partner, counted from the core outward.
+
+    `hit_outer` flank bases pair with `hit_inner` partner bases; `skip_outer` /
+    `skip_inner` bases on each side lie between the core and that paired stretch,
+    and `unpaired` flank bases lie beyond it. Skipped and unpaired bases are gap
+    columns in the measurement, never aligned.
+    """
+    unpaired: int
+    hit_outer: int
+    skip_outer: int
+    hit_inner: int
+    skip_inner: int
+
+
 @dataclass(frozen=True)
 class Bounds:
     l5b: int
@@ -501,16 +517,102 @@ class Bounds:
     l3b: int
     l3e: int
     margin_bits: float | None
+    # Set per end when a credit decided how that end's flank pairs (End A: the
+    # 5' outer end, whose partner is the 3' LTR's inner side; End B: the 3' outer
+    # end, whose partner is the 5' LTR's inner side). See `Pairing`.
+    pair5: Pairing | None = None
+    pair3: Pairing | None = None
 
     @property
     def spans(self) -> tuple[int, int, int, int]:
         return self.l5b, self.l5e, self.l3b, self.l3e
 
+    @property
+    def credited(self) -> bool:
+        return self.pair5 is not None or self.pair3 is not None
+
+    @property
+    def unpaired5(self) -> int:
+        return self.pair5.unpaired if self.pair5 else 0
+
+    @property
+    def unpaired3(self) -> int:
+        return self.pair3.unpaired if self.pair3 else 0
+
+
+# How many partner bases may separate the core from the start of a credited
+# segment's homolog: room for an insertion next to the core in the partner LTR,
+# not for a stretch of internal region that merely resembles the segment. (On
+# the flank side any distance is allowed: the credit already vouches that every
+# flank base belongs to the element, and skipped bases are gap columns.)
+MAX_PARTNER_SKIP = 200
+
+# A credited flank that homology alone carries keeps the whole-flank alignment when
+# no significant local pairing shows otherwise and it is shorter than this: a real
+# homolog that short can fail E <= MAX_EVALUE (a perfect match needs ~50 bp, a 15%
+# diverged one ~80), so failing the test says nothing about whether it pairs.
+MIN_PAIRED_FLANK = 100
+
+# A pairing within this many bases of every edge of the flank (its core side, on
+# both LTRs, and its outer end) covers the whole flank: a local alignment drops a few
+# mismatched end bases, which says nothing about a partner.
+PAIRING_END_SLACK = 5
+
+# Callers that hand in `tsd_credit` can check for this: a credit moves an OUTER
+# boundary only, the partner's inner boundary follows homology, and credited bases
+# with no partner are gap columns (see `_extend`, `_homologous_reach`, `_measure`).
+CREDIT_PAIRS_BY_HOMOLOGY = True
+
+
+def _best_hit(outer: str, inner: str) -> tuple[int, int, int, int] | None:
+    """`(qs, qe, rs, re)`: the best local alignment of `outer` with `inner` under the
+    generic model, `None` unless significant (E <= MAX_EVALUE over the two lengths).
+
+    Both are oriented from the core outward (index 0 next to it), as in `_extend`;
+    `outer[qs:qe + 1]` aligns with `inner[rs:re + 1]`.
+    """
+    if not outer or not inner:
+        return None
+    fwd = parasail.sw_striped_sat(outer, inner, SIG_GAP_OPEN, SIG_GAP_EXTEND, GENERIC_MATRIX)
+    if fwd.score <= 0 or evalue(bits(fwd.score), len(outer), len(inner)) > MAX_EVALUE:
+        return None
+    qe, re_ = fwd.end_query, fwd.end_ref
+    rev = parasail.sw_striped_sat(outer[:qe + 1][::-1], inner[:re_ + 1][::-1],
+                                  SIG_GAP_OPEN, SIG_GAP_EXTEND, GENERIC_MATRIX)
+    return qe - rev.end_query, qe, re_ - rev.end_ref, re_
+
+
+def _homologous_reach(outer: str, inner: str) -> tuple[int, int, int, int] | None:
+    """Where a credited `outer` really pairs with `inner`: its significant best local
+    hit (`_best_hit`), kept only when it starts at most MAX_PARTNER_SKIP partner bases
+    from the core, so internal-region sequence that happens to resemble the credited
+    segment cannot drag the inner boundary into the element's interior. `None` when
+    nothing qualifies, which is also what a short shared stretch (under ~50 bp) gets:
+    it stays unpaired, and the divergence of the pair is left as the core measured it.
+    """
+    hit = _best_hit(outer, inner)
+    return hit if hit is not None and hit[2] <= MAX_PARTNER_SKIP else None
+
+
+def _covers(hit: tuple[int, int, int, int], n: int) -> bool:
+    """Whether a pairing reaches every edge of an `n`-base flank, up to
+    PAIRING_END_SLACK bases."""
+    qs, qe, rs, _ = hit
+    return max(qs, rs, n - 1 - qe) <= PAIRING_END_SLACK
+
+
+def _pairing(n: int, hit: tuple[int, int, int, int] | None) -> tuple[int, Pairing]:
+    """(partner bases that join the partner LTR, how an `n`-base flank pairs)."""
+    if hit is None:
+        return 0, Pairing(n, 0, 0, 0, 0)
+    qs, qe, rs, re_ = hit
+    return re_ + 1, Pairing(n - qe - 1, qe - qs + 1, qs, re_ - rs + 1, rs)
+
 
 def _extend(outer: str, inner: str, matrix, gaps: Gaps, t_bits: float,
             graded: bool, alpha: float | None = None,
             beta: float | None = None,
-            credit: float = 0.0) -> tuple[int, int, float]:
+            credit: float = 0.0) -> tuple[int, int, float | None, Pairing | None]:
     """One anchored outward extension of an alignment end.
 
     `outer` is the candidate flank, consumed from the core outward; `inner` is
@@ -518,14 +620,26 @@ def _extend(outer: str, inner: str, matrix, gaps: Gaps, t_bits: float,
     that index 0 is adjacent to the core, which is what makes "begins anchored"
     mean "next to the core".
 
-    Returns `(k_outer, k_inner, margin_bits)`: how many bases of each side the
-    boundary moves, and how decisively the call was made. `k_outer ==
+    Returns `(k_outer, k_inner, margin_bits, pairing)`: how many bases of each
+    side the boundary moves, how decisively the call was made, and -- only when
+    the credit decided it -- how the flank pairs (`Pairing`). `k_outer ==
     len(outer)` means the boundary snapped all the way to the sequence terminus.
 
     `credit` is evidence from outside the sequence that this terminus is already
-    the element's boundary, in bits. It raises what the extension is allowed to
-    cost and can therefore only ever move the boundary further out; in binary
-    mode "further out" means the sequence terminus and nothing else.
+    the element's boundary, in bits, and it is evidence about the OUTER boundary
+    only. When homology alone would not carry the boundary to the terminus but
+    the credit does, the outer boundary goes to the terminus while the inner one
+    moves only as far as the flank really pairs with its partner
+    (`_homologous_reach`); flank and partner bases outside that pairing are gap
+    columns in the measurement instead of being aligned onto each other. Such a
+    boundary reports no margin -- it was not a homology call -- and the credit
+    never enters the graded scan. A credited flank that homology alone carries keeps
+    the whole-flank alignment homology gives it, unless a significant local pairing
+    shows that alignment is wrong -- it stops short of the terminus, starts well out
+    from the core, or lies more than MAX_PARTNER_SKIP bases into the partner side (a
+    well-paired part can carry a whole-flank score over stretches with no partner)
+    -- or the flank is long enough to show a pairing (`MIN_PAIRED_FLANK`) and shows
+    none.
 
     Binary mode is the shipped rule: consume the whole flank iff doing so costs
     less than `t_bits` (under the penalised objective `score - T*(free ends)`,
@@ -534,21 +648,43 @@ def _extend(outer: str, inner: str, matrix, gaps: Gaps, t_bits: float,
     call becomes a position rather than a verdict.
     """
     if not outer or not inner:
-        return 0, 0, None
+        return 0, 0, None, None
     # The cap describes how much evidence the flank itself could ever supply;
     # `credit` is evidence from outside the sequence, so it is added after.
-    t_bits = effective_t_bits(t_bits, len(outer), alpha, beta) + credit
+    t_own = effective_t_bits(t_bits, len(outer), alpha, beta)
+    t_all = t_own + credit
     n_ref = min(len(inner), 2 * len(outer) + EXT_REF_SLACK)
     inner = inner[:n_ref]
     res = parasail.sg_de_striped_sat(outer, inner, gaps.open, gaps.extend, matrix)
     s_full = bits(res.score)
-    margin = abs(s_full + t_bits)
+    margin = abs(s_full + t_all)
+    if s_full > -t_own:
+        if credit:
+            # The terminus is vouched for from outside, so the only question left is
+            # how the flank pairs: a whole-flank score carried by a well-paired part
+            # says nothing about the rest. What homology alone would pair stands unless
+            # a significant local pairing shows it stops short, starts out, or lies too
+            # deep in the partner side -- or a long flank shows no pairing at all.
+            hit = _best_hit(outer, inner)
+            if hit is not None and not _covers(hit, len(outer)):
+                k_in, pairing = _pairing(
+                    len(outer), hit if hit[2] <= MAX_PARTNER_SKIP else None)
+                return len(outer), k_in, margin, pairing
+            if hit is None and len(outer) >= MIN_PAIRED_FLANK:
+                return len(outer), 0, margin, _pairing(len(outer), None)[1]
+        return len(outer), res.end_ref + 1, margin, None
+    if credit and s_full > -t_all:
+        k_in, pairing = _pairing(len(outer), _homologous_reach(outer, inner))
+        return len(outer), k_in, None, pairing
     if not graded:
-        if s_full > -t_bits:
-            return len(outer), res.end_ref + 1, margin
-        return 0, 0, margin
-    if s_full > -t_bits:
-        return len(outer), res.end_ref + 1, margin
+        return 0, 0, margin, None
+    # H(last) == s_full, so the scan never reaches the terminus here: no credit needed.
+    k_out, k_in = _graded_reach(outer, inner, matrix, gaps, t_own)
+    return k_out, k_in, margin, None
+
+
+def _graded_reach(outer: str, inner: str, matrix, gaps: Gaps, t_own: float) -> tuple[int, int]:
+    """Graded mode's boundary: the furthest endpoint still above the noise floor."""
     # Not homologous all the way out. Find the furthest endpoint still above the
     # noise floor. H(k) = best score consuming exactly k outer bases; H(0) = 0.
     #
@@ -571,11 +707,11 @@ def _extend(outer: str, inner: str, matrix, gaps: Gaps, t_bits: float,
     res = parasail.sg_de_table_striped_sat(q, r, gaps.open, gaps.extend, matrix)
     tab = np.asarray(res.score_table)
     H = tab.max(axis=1)
-    ok = np.nonzero(H > -t_bits * SCALE)[0]
+    ok = np.nonzero(H > -t_own * SCALE)[0]
     if not len(ok):
-        return 0, 0, margin
+        return 0, 0
     k = int(ok[-1])                      # 0-based row -> k = k+1 outer bases
-    return k + 1, int(tab[k].argmax()) + 1, margin
+    return k + 1, int(tab[k].argmax()) + 1
 
 
 def _joint_inner(S: str, b: Bounds, matrix, gaps: Gaps) -> Bounds:
@@ -588,6 +724,11 @@ def _joint_inner(S: str, b: Bounds, matrix, gaps: Gaps) -> Bounds:
     are the free ends of a single semi-global alignment, so they are chosen
     jointly and optimally rather than inherited.
     """
+    if b.credited:
+        # A credited end's inner boundary already follows homology; re-deriving
+        # it from an alignment anchored at the credited terminus would pair the
+        # unpaired flank all over again.
+        return b
     L = len(S)
     span = b.l3e + 1 - b.l5b
     if span < 4:
@@ -636,6 +777,7 @@ def snap_bounds(S: str, spans, matrix, gaps: Gaps = SIG_GAPS, t_bits: float = T_
     L = len(S)
     l5b, l5e, l3b, l3e = spans
     margins: list[float] = []
+    pair5 = pair3 = None
     graded = mode == "graded"
     if mode not in ("binary", "graded"):
         raise ValueError(f"unknown snap mode {mode!r}; choices: 'binary', 'graded'")
@@ -643,8 +785,8 @@ def snap_bounds(S: str, spans, matrix, gaps: Gaps = SIG_GAPS, t_bits: float = T_
     # End A: the 5' outer boundary and the 3' inner boundary are the same end of
     # the alignment. Reversed so index 0 is adjacent to the core.
     if l5b > 0 and l3b > l5e + 1:
-        k_out, k_in, m = _extend(S[:l5b][::-1], S[l5e + 1:l3b][::-1],
-                                 matrix, gaps, t_bits, graded, alpha, beta, credit)
+        k_out, k_in, m, pair5 = _extend(S[:l5b][::-1], S[l5e + 1:l3b][::-1],
+                                        matrix, gaps, t_bits, graded, alpha, beta, credit)
         if m is not None:
             margins.append(m)
         l5b -= k_out
@@ -653,8 +795,8 @@ def snap_bounds(S: str, spans, matrix, gaps: Gaps = SIG_GAPS, t_bits: float = T_
     # End B: the 3' outer boundary and the 5' inner boundary. Already oriented
     # outward from the core, so no reversal.
     if l3e < L - 1 and l3b > l5e + 1:
-        k_out, k_in, m = _extend(S[l3e + 1:], S[l5e + 1:l3b],
-                                 matrix, gaps, t_bits, graded, alpha, beta, credit)
+        k_out, k_in, m, pair3 = _extend(S[l3e + 1:], S[l5e + 1:l3b],
+                                        matrix, gaps, t_bits, graded, alpha, beta, credit)
         if m is not None:
             margins.append(m)
         l3e += k_out
@@ -663,7 +805,7 @@ def snap_bounds(S: str, spans, matrix, gaps: Gaps = SIG_GAPS, t_bits: float = T_
     l5b = max(0, l5b)
     l3e = min(L - 1, l3e)
     l5e = min(l5e, l3b - 1)
-    b = Bounds(l5b, l5e, l3b, l3e, min(margins) if margins else None)
+    b = Bounds(l5b, l5e, l3b, l3e, min(margins) if margins else None, pair5, pair3)
     if inner == "joint":
         b = _joint_inner(S, b, matrix, gaps)
     elif inner != "none":
@@ -813,6 +955,138 @@ def _refine_matrix(q: str, r: str, matrix, gaps: Gaps = SIG_GAPS) -> tuple[str, 
     return res.traceback.query, res.traceback.ref
 
 
+def _credited_alignment(q: str, r: str, p5: Pairing | None, p3: Pairing | None,
+                        align) -> tuple[str, str]:
+    """The pair aligned piece by piece: End A's paired stretch, the core, End B's.
+
+    5' LTR  q = [unpaired | A hit | A skip | core | B skip | B hit]
+    3' LTR  r = [A hit | A skip | core | B skip | B hit | unpaired]
+    (End A's flank is q's start, its partner r's inner side; End B's flank is r's
+    end, its partner q's inner side.) Unpaired and skipped bases are gap columns.
+    """
+    z = Pairing(0, 0, 0, 0, 0)
+    p5, p3 = p5 or z, p3 or z
+
+    def pair(x: str, y: str) -> tuple[str, str]:
+        if x and y:
+            return align(x, y)
+        return x + "-" * len(y), "-" * len(x) + y
+
+    i = p5.unpaired
+    qa_hit, i = q[i:i + p5.hit_outer], i + p5.hit_outer
+    qa_skip, i = q[i:i + p5.skip_outer], i + p5.skip_outer
+    k = len(q) - p3.hit_inner - p3.skip_inner
+    q_core, qb_skip, qb_hit = q[i:k], q[k:k + p3.skip_inner], q[k + p3.skip_inner:]
+    ra_hit, ra_skip = r[:p5.hit_inner], r[p5.hit_inner:p5.hit_inner + p5.skip_inner]
+    j = len(r) - p3.unpaired - p3.hit_outer - p3.skip_outer
+    r_core = r[p5.hit_inner + p5.skip_inner:j]
+    rb_skip = r[j:j + p3.skip_outer]
+    rb_hit, rb_unp = r[j + p3.skip_outer:len(r) - p3.unpaired], r[len(r) - p3.unpaired:]
+    a1, b1 = pair(qa_hit, ra_hit)
+    a2, b2 = pair(q_core, r_core)
+    a3, b3 = pair(qb_hit, rb_hit)
+    a = (q[:p5.unpaired] + a1 + qa_skip + "-" * len(ra_skip) + a2
+         + qb_skip + "-" * len(rb_skip) + a3 + "-" * len(rb_unp))
+    b = ("-" * p5.unpaired + b1 + "-" * len(qa_skip) + ra_skip + b2
+         + "-" * len(qb_skip) + rb_skip + b3 + rb_unp)
+    return a, b
+
+
+def _measure(seq_id: str, S: str, bounds: Bounds, gaps: Gaps, matrix, *, w: int,
+             refine: str = "wfa", trim: int = 0, cs: bool = False,
+             keep_weak: bool = True, max_evalue: float = MAX_EVALUE,
+             min_bitscore: float | None = None,
+             mutation_rate: float | None = None) -> tuple[Result, tuple[str, str] | None]:
+    """Stage 5: the settled pair's alignment, counts, divergence and significance.
+
+    `w` is the search-space size the significance of the pair is judged against
+    (the discovery window when the pair was discovered).
+
+    A credited pair is aligned piecewise (`_credited_alignment`): each credited
+    end's paired stretch and the core separately, with the bases a credit placed
+    outside any pairing laid down as gap columns. Left to one end-to-end
+    alignment, two such runs facing each other -- unpaired flank ends, or blocks
+    between the core and a flank's paired stretch -- are cheaper to slide past
+    each other as mismatches than to gap, which would turn missing sequence into
+    divergence. For the same reason a credited pair's significance is a local
+    score of its paired parts: bases the credit placed without a partner are not
+    evidence against the pair.
+    """
+    L = len(S)
+    q = S[bounds.l5b:bounds.l5e + 1]
+    r = S[bounds.l3b:bounds.l3e + 1]
+    if not q or not r:
+        return _empty(seq_id, L, "no_pair"), None
+    u5, u3 = bounds.unpaired5, bounds.unpaired3
+    qp, rp = q[u5:], r[:len(r) - u3]
+    if not qp or not rp:
+        return _empty(seq_id, L, "no_pair"), None
+    if refine == "wfa":
+        def align(x, y):
+            return _refine(x, y, gaps)
+    else:
+        def align(x, y):
+            return _refine_matrix(x, y, matrix, gaps)
+    if bounds.credited:
+        a, b = _credited_alignment(q, r, bounds.pair5, bounds.pair3, align)
+    else:
+        a, b = align(q, r)
+    if trim:
+        if len(a) <= 2 * trim:
+            return _empty(seq_id, L, "no_pair"), None
+        a, b = a[trim:-trim], b[trim:-trim]
+    counts = count_substitutions(a, b)
+    if counts.n_sites == 0:
+        return _empty(seq_id, L, "no_pair"), None
+
+    # Significance is ALWAYS scored with the generic model -- GENERIC_MATRIX and
+    # SIG_GAPS -- never the calibrated one. MAX_EVALUE is calibrated against that
+    # scale; the calibrated matrix is on a different one (at low divergence a
+    # match scores +8 vs GENERIC's +4), so the same numeric threshold is not
+    # transferable, and mixing them leaked spurious hits in Stage 4 (14/2500 ->
+    # 0/2500 once gated on GENERIC). Pinning the gap penalties here too is what
+    # lets `gap_scheme` change the ALIGNMENT without moving the significance
+    # threshold underneath it.
+    if bounds.credited:
+        score = parasail.sw_striped_sat(qp, rp, SIG_GAP_OPEN, SIG_GAP_EXTEND,
+                                        GENERIC_MATRIX).score
+    else:
+        score = parasail.nw_striped_sat(q, r, SIG_GAP_OPEN, SIG_GAP_EXTEND,
+                                        GENERIC_MATRIX).score
+    bitscore = bits(score)
+    weak = (evalue(bitscore, w, w) > max_evalue
+            or (min_bitscore is not None and bitscore < min_bitscore))
+    if weak and not keep_weak:
+        return _empty(seq_id, L, "no_pair"), None
+
+    d, se = k2p_distance(counts)
+    # Reported straight off the settled boundaries, never searched for: the tool
+    # uses no terminal-motif prior anywhere, so this column stays an INDEPENDENT
+    # check on the boundary call rather than a restatement of it.
+    motif = (f"{q[:2]}...{r[-2:]}".lower()
+             if len(q) >= 2 and len(r) >= 2 else None)
+    # A located-but-insignificant pair is reported, not deleted: its coordinates,
+    # counts and divergence are real measurements, and `status == "pass"` still
+    # means exactly what it always did, so the TSV remains a clean filter.
+    status = "weak_pair" if weak else ("pass" if d is not None else "k2p_undefined")
+    pd = p_distance(counts)
+    aln_str = cs_string(a, b) if cs else extended_cigar(a, b)
+    return (Result(
+        seq_id=seq_id, seq_len=L, status=status,
+        ltr5_start=bounds.l5b + 1, ltr5_end=bounds.l5e + 1,
+        ltr3_start=bounds.l3b + 1, ltr3_end=bounds.l3e + 1,
+        ltr5_len=bounds.l5e - bounds.l5b + 1, ltr3_len=bounds.l3e - bounds.l3b + 1,
+        flank5_len=bounds.l5b, flank3_len=L - 1 - bounds.l3e,
+        aln_len=counts.aln_len, n_sites=counts.n_sites, n_ts=counts.n_ts,
+        n_tv=counts.n_tv, n_gapcols=counts.n_gapcols,
+        identity=counts.n_match / counts.n_sites,
+        p_dist=pd, k2p=d, k2p_se=se, bitscore=bitscore,
+        flank_margin_bits=bounds.margin_bits, cigar=aln_str,
+        motif=motif, k2p_time=insertion_time(d, mutation_rate),
+        orientation=None, tsd=None, tsd_offset=None, tsd_input=None,
+    ), (a, b))
+
+
 def classify(seq_id: str, S: str, **kw) -> Result:
     """Locate the LTR pair and measure its divergence.
 
@@ -835,7 +1109,16 @@ def classify(seq_id: str, S: str, **kw) -> Result:
     `tsd_credit` is external evidence, in bits, that the sequence's own termini
     are already the element's boundaries -- `--tsd-anchor` turns a genomic
     target-site duplication into it. It is a plain number here on purpose: this
-    module locates LTR pairs and has no business knowing what a genome is.
+    module locates LTR pairs and has no business knowing what a genome is. It is
+    evidence about the OUTER boundaries only: a credit-carried end goes to the
+    terminus, the partner LTR's inner boundary moves only as far as the carried
+    flank really pairs with it, and flank bases with no partner are reported as
+    gap columns (never as substitutions, so they cannot inflate the divergence).
+
+    `spans=(l5b, l5e, l3b, l3e)` (0-based, inclusive) is a pair the caller
+    already knows -- e.g. one it widened or trimmed itself. Discovery and Stage 4
+    are skipped and that pair is snapped from and measured; spans that cannot be
+    a pair in `S` give status `bad_spans`.
 
     Keyword knobs after `min_bitscore` drive the benchmark ablations; their
     defaults reproduce production behaviour. See `_classify` for the full
@@ -843,6 +1126,52 @@ def classify(seq_id: str, S: str, **kw) -> Result:
     plain `Result`.
     """
     return _classify(seq_id, S, **kw)[0]
+
+
+def _classify_known(seq_id: str, S: str, spans, *, cs: bool, t_bits: float | None,
+                    max_evalue: float, min_bitscore: float | None, matrix,
+                    use_stage3: bool, trim: int, refine: str, snap_mode: str, inner: str,
+                    comp: str, gap_scheme: str, keep_weak: bool, flank_sensitivity: str,
+                    mutation_rate: float | None,
+                    tsd_credit: float) -> tuple[Result, tuple[str, str] | None]:
+    """`_classify` for a pair the caller already knows: no discovery, no Stage 4.
+
+    A caller that widened or trimmed a record it had already classified knows
+    which pair it holds. Re-discovering one on the edited record can lock onto a
+    different, unrelated pair, and Stage 4 would trade the given pair for an
+    outer one; here the given spans are calibrated on, snapped from (so a credit
+    still moves only their outer boundaries) and measured. The significance of
+    the pair is judged against its own LTR length. Spans that cannot be a pair
+    in this record give status `bad_spans`.
+    """
+    L = len(S)
+    try:
+        l5b, l5e, l3b, l3e = (int(x) for x in spans)
+    except (TypeError, ValueError):
+        return _empty(seq_id, L, "bad_spans"), None
+    if not 0 <= l5b <= l5e < l3b <= l3e < L:
+        return _empty(seq_id, L, "bad_spans"), None
+    if flank_sensitivity not in FLANK_SENSITIVITY:
+        raise ValueError(f"unknown flank_sensitivity {flank_sensitivity!r}; "
+                         f"choices: {sorted(FLANK_SENSITIVITY)}")
+    beta = FLANK_SENSITIVITY[flank_sensitivity]
+    pair = (l5b, l5e, l3b, l3e)
+    d_hat = None
+    alpha = generic_alpha()
+    gaps = gaps_for_scheme(gap_scheme if gap_scheme != "adaptive" else "legacy")
+    if matrix is None:
+        cal = calibrate_full(S, pair, comp=comp, gap_scheme=gap_scheme)
+        matrix, d_hat, gaps, alpha = cal.matrix, cal.d_hat, cal.gaps, cal.alpha
+    tb = t_bits if t_bits is not None else t_bits_for(d_hat)
+    if use_stage3:
+        bounds = snap_bounds(S, pair, matrix, gaps, tb, mode=snap_mode, inner=inner,
+                             alpha=alpha, beta=beta, credit=tsd_credit)
+    else:
+        bounds = Bounds(*pair, None)
+    return _measure(seq_id, S, bounds, gaps, matrix, w=max(l5e - l5b + 1, l3e - l3b + 1),
+                    refine=refine, trim=trim, cs=cs, keep_weak=keep_weak,
+                    max_evalue=max_evalue, min_bitscore=min_bitscore,
+                    mutation_rate=mutation_rate)
 
 
 def _classify(seq_id: str, S: str, *, cs: bool = False, t_bits: float | None = None,
@@ -855,7 +1184,9 @@ def _classify(seq_id: str, S: str, *, cs: bool = False, t_bits: float | None = N
               keep_weak: bool = True, stage4_recal: bool = True,
               flank_sensitivity: str = "strict", period_rule: str = "best-score",
               mutation_rate: float | None = None,
-              tsd_credit: float = 0.0) -> tuple[Result, tuple[str, str] | None]:
+              tsd_credit: float = 0.0,
+              spans: tuple[int, int, int, int] | None = None,
+              ) -> tuple[Result, tuple[str, str] | None]:
     """`classify` plus the final aligned LTR pair.
 
     The pair is what `extras.py` builds the IUPAC consensus from. Returning it
@@ -870,6 +1201,14 @@ def _classify(seq_id: str, S: str, *, cs: bool = False, t_bits: float | None = N
         return _empty(seq_id, L, "too_short"), None
     if all(ch == "N" for ch in S):
         return _empty(seq_id, L, "all_ambiguous"), None
+    if spans is not None:
+        return _classify_known(seq_id, S, spans, cs=cs, t_bits=t_bits,
+                               max_evalue=max_evalue, min_bitscore=min_bitscore,
+                               matrix=matrix, use_stage3=use_stage3, trim=trim,
+                               refine=refine, snap_mode=snap_mode, inner=inner, comp=comp,
+                               gap_scheme=gap_scheme, keep_weak=keep_weak,
+                               flank_sensitivity=flank_sensitivity,
+                               mutation_rate=mutation_rate, tsd_credit=tsd_credit)
 
     hit = discover(S, GENERIC_MATRIX, SIG_GAPS, w0=w0, rule=period_rule)
     if hit is None:
@@ -925,58 +1264,6 @@ def _classify(seq_id: str, S: str, *, cs: bool = False, t_bits: float | None = N
         else:
             bounds = outer
 
-    q = S[bounds.l5b:bounds.l5e + 1]
-    r = S[bounds.l3b:bounds.l3e + 1]
-    if not q or not r:
-        return _empty(seq_id, L, "no_pair"), None
-    a, b = _refine(q, r, gaps) if refine == "wfa" else _refine_matrix(q, r, matrix, gaps)
-    if trim:
-        if len(a) <= 2 * trim:
-            return _empty(seq_id, L, "no_pair"), None
-        a, b = a[trim:-trim], b[trim:-trim]
-    counts = count_substitutions(a, b)
-    if counts.n_sites == 0:
-        return _empty(seq_id, L, "no_pair"), None
-
-    # Significance is ALWAYS scored with the generic model -- GENERIC_MATRIX and
-    # SIG_GAPS -- never the calibrated one. MAX_EVALUE is calibrated against that
-    # scale; the calibrated matrix is on a different one (at low divergence a
-    # match scores +8 vs GENERIC's +4), so the same numeric threshold is not
-    # transferable, and mixing them leaked spurious hits in Stage 4 (14/2500 ->
-    # 0/2500 once gated on GENERIC). Pinning the gap penalties here too is what
-    # lets `gap_scheme` change the ALIGNMENT without moving the significance
-    # threshold underneath it.
-    score = parasail.nw_striped_sat(q, r, SIG_GAP_OPEN, SIG_GAP_EXTEND,
-                                    GENERIC_MATRIX).score
-    bitscore = bits(score)
-    weak = (evalue(bitscore, hit.w, hit.w) > max_evalue
-            or (min_bitscore is not None and bitscore < min_bitscore))
-    if weak and not keep_weak:
-        return _empty(seq_id, L, "no_pair"), None
-
-    d, se = k2p_distance(counts)
-    # Reported straight off the settled boundaries, never searched for: the tool
-    # uses no terminal-motif prior anywhere, so this column stays an INDEPENDENT
-    # check on the boundary call rather than a restatement of it.
-    motif = (f"{q[:2]}...{r[-2:]}".lower()
-             if len(q) >= 2 and len(r) >= 2 else None)
-    # A located-but-insignificant pair is reported, not deleted: its coordinates,
-    # counts and divergence are real measurements, and `status == "pass"` still
-    # means exactly what it always did, so the TSV remains a clean filter.
-    status = "weak_pair" if weak else ("pass" if d is not None else "k2p_undefined")
-    pd = p_distance(counts)
-    aln_str = cs_string(a, b) if cs else extended_cigar(a, b)
-    return (Result(
-        seq_id=seq_id, seq_len=L, status=status,
-        ltr5_start=bounds.l5b + 1, ltr5_end=bounds.l5e + 1,
-        ltr3_start=bounds.l3b + 1, ltr3_end=bounds.l3e + 1,
-        ltr5_len=bounds.l5e - bounds.l5b + 1, ltr3_len=bounds.l3e - bounds.l3b + 1,
-        flank5_len=bounds.l5b, flank3_len=L - 1 - bounds.l3e,
-        aln_len=counts.aln_len, n_sites=counts.n_sites, n_ts=counts.n_ts,
-        n_tv=counts.n_tv, n_gapcols=counts.n_gapcols,
-        identity=counts.n_match / counts.n_sites,
-        p_dist=pd, k2p=d, k2p_se=se, bitscore=bitscore,
-        flank_margin_bits=bounds.margin_bits, cigar=aln_str,
-        motif=motif, k2p_time=insertion_time(d, mutation_rate),
-        orientation=None, tsd=None, tsd_offset=None, tsd_input=None,
-    ), (a, b))
+    return _measure(seq_id, S, bounds, gaps, matrix, w=hit.w, refine=refine, trim=trim,
+                    cs=cs, keep_weak=keep_weak, max_evalue=max_evalue,
+                    min_bitscore=min_bitscore, mutation_rate=mutation_rate)

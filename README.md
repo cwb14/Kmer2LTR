@@ -28,8 +28,10 @@ which is exactly what makes them worth reading.
 
 One flag can change that, and only if you ask for it. `--tsd-anchor` lets a
 target-site duplication argue against calling a flank; turning it on spends the
-TSD's independence to buy a boundary correction. It is off by default, and
-`docs/benchmarks.md` shows why the evidence does not currently support turning it
+TSD's independence to buy a boundary correction. It moves only the outer boundary:
+the other LTR's inner boundary follows real homology, and flank bases with no partner
+count as gaps, not substitutions, so divergence is not inflated. It is off by default,
+and `docs/benchmarks.md` shows why the evidence does not currently support turning it
 on.
 
 Note: your input LTR-RTs may have been detected using pipelines that are tuned for boundary classification using `TG…CA` termini and/or TSDs. 
